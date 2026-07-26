@@ -63,3 +63,27 @@ test("Codex app-server approval request is resolved through Hibro", async () => 
   assert.deepEqual(approvals, ["command:printf approved"]);
   assert.equal(result.result, "CODEX:APPROVAL:acceptForSession");
 });
+
+test("approval waiting time does not consume the Codex execution timeout", async () => {
+  const result = await new CodexAdapter({ executable }).execute({
+    prompt: "APPROVAL",
+    workspace: process.cwd(),
+    options: { timeoutMs: 40 },
+    requestApproval: async () => {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 80));
+      return "allow_once";
+    },
+  });
+  assert.equal(result.result, "CODEX:APPROVAL:accept");
+});
+
+test("Codex timeout is reported as timeout instead of an exit error", async () => {
+  await assert.rejects(
+    new CodexAdapter({ executable }).execute({
+      prompt: "HANG",
+      workspace: process.cwd(),
+      options: { timeoutMs: 200 },
+    }),
+    (error: Error & { code?: string }) => error.code === "timeout",
+  );
+});

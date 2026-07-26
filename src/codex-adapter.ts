@@ -87,6 +87,10 @@ export class CodexAdapter implements AgentEngineAdapter {
       env: environment,
       stdio: ["pipe", "pipe", "pipe"],
     });
+    const processExit = new Promise<number>((resolvePromise, reject) => {
+      child.once("error", reject);
+      child.once("close", (code) => resolvePromise(code ?? 1));
+    });
     let stderr = "";
     let sessionId: string | undefined;
     let result = "";
@@ -94,6 +98,9 @@ export class CodexAdapter implements AgentEngineAdapter {
     let parseFailure: Error | undefined;
     let timedOut = false;
     let forceKillTimer: NodeJS.Timeout | undefined;
+    let timeout: NodeJS.Timeout | undefined;
+    let timeoutStartedAt = 0;
+    let remainingTimeoutMs = input.options?.timeoutMs;
     let requestId = 0;
     let completed = false;
     const pending = new Map<
@@ -103,6 +110,12 @@ export class CodexAdapter implements AgentEngineAdapter {
         reject: (reason: Error) => void;
       }
     >();
+    void processExit.then((code) => {
+      for (const waiter of pending.values()) {
+        waiter.reject(new Error(`Codex app-server exited with code ${code}`));
+      }
+      pending.clear();
+    });
     let resolveTurn!: () => void;
     let rejectTurn!: (reason: Error) => void;
     const turnCompleted = new Promise<void>((resolvePromise, reject) => {
@@ -120,13 +133,34 @@ export class CodexAdapter implements AgentEngineAdapter {
     input.signal?.addEventListener("abort", abortListener, { once: true });
     if (input.signal?.aborted) terminate();
     const timeoutMs = input.options?.timeoutMs;
-    const timeout = timeoutMs
-      ? setTimeout(() => {
-          timedOut = true;
-          terminate();
-        }, timeoutMs)
-      : undefined;
-    timeout?.unref();
+    const resumeTimeout = (): void => {
+      if (
+        remainingTimeoutMs === undefined ||
+        timeout ||
+        timedOut ||
+        completed
+      ) {
+        return;
+      }
+      timeoutStartedAt = Date.now();
+      timeout = setTimeout(() => {
+        timeout = undefined;
+        remainingTimeoutMs = 0;
+        timedOut = true;
+        terminate();
+      }, Math.max(0, remainingTimeoutMs));
+      timeout.unref();
+    };
+    const pauseTimeout = (): void => {
+      if (!timeout || remainingTimeoutMs === undefined) return;
+      clearTimeout(timeout);
+      timeout = undefined;
+      remainingTimeoutMs = Math.max(
+        0,
+        remainingTimeoutMs - (Date.now() - timeoutStartedAt),
+      );
+    };
+    resumeTimeout();
 
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
@@ -159,30 +193,36 @@ export class CodexAdapter implements AgentEngineAdapter {
       );
       const command =
         typeof params.command === "string" ? params.command : undefined;
-      const decision = await input.requestApproval({
-        externalId,
-        kind: method.includes("fileChange")
-          ? "file_change"
-          : method.includes("permissions")
-            ? "permission"
-            : params.networkApprovalContext
-              ? "network"
-              : "command",
-        title: method.includes("fileChange")
-          ? "Codex 请求修改文件"
-          : method.includes("permissions")
-            ? "Codex 请求扩展权限"
-            : "Codex 请求执行命令",
-        detail:
-          command ??
-          (typeof params.reason === "string"
-            ? params.reason
-            : JSON.stringify(params)),
-        command,
-        cwd: typeof params.cwd === "string" ? params.cwd : input.workspace,
-        toolName: method,
-        payload: params,
-      });
+      pauseTimeout();
+      let decision;
+      try {
+        decision = await input.requestApproval({
+          externalId,
+          kind: method.includes("fileChange")
+            ? "file_change"
+            : method.includes("permissions")
+              ? "permission"
+              : params.networkApprovalContext
+                ? "network"
+                : "command",
+          title: method.includes("fileChange")
+            ? "Codex 请求修改文件"
+            : method.includes("permissions")
+              ? "Codex 请求扩展权限"
+              : "Codex 请求执行命令",
+          detail:
+            command ??
+            (typeof params.reason === "string"
+              ? params.reason
+              : JSON.stringify(params)),
+          command,
+          cwd: typeof params.cwd === "string" ? params.cwd : input.workspace,
+          toolName: method,
+          payload: params,
+        });
+      } finally {
+        resumeTimeout();
+      }
       if (method === "item/permissions/requestApproval") {
         write({
           id: message.id,
@@ -307,10 +347,7 @@ export class CodexAdapter implements AgentEngineAdapter {
       }
     });
 
-    const processExit = new Promise<number>((resolvePromise, reject) => {
-      child.once("error", reject);
-      child.once("close", (code) => resolvePromise(code ?? 1));
-    });
+    let executionError: unknown;
     try {
       await request("initialize", {
         clientInfo: {
@@ -357,9 +394,13 @@ export class CodexAdapter implements AgentEngineAdapter {
       await Promise.race([
         turnCompleted,
         processExit.then((code) => {
-          if (!completed) throw new Error(`Codex app-server exited with code ${code}`);
+          if (!completed && !timedOut && !input.signal?.aborted) {
+            throw new Error(`Codex app-server exited with code ${code}`);
+          }
         }),
       ]);
+    } catch (error) {
+      executionError = error;
     } finally {
       terminate();
       await processExit.catch(() => 1);
@@ -374,6 +415,7 @@ export class CodexAdapter implements AgentEngineAdapter {
     }
     if (timedOut) throw new EngineProcessError("timeout", `Codex exceeded ${timeoutMs} ms`);
     if (input.signal?.aborted) throw new EngineProcessError("cancelled", "Codex run was cancelled");
+    if (executionError) throw executionError;
     if (parseFailure) throw new EngineProcessError("protocol_error", parseFailure.message);
     if (!completed) throw new EngineProcessError("engine_failed", stderr.trim() || "Codex stopped");
     return { sessionId, result, rawResult };

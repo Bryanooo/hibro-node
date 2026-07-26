@@ -43,6 +43,7 @@ lines.on("line", (line) => {
   if (message.method === "turn/start") {
     pendingPrompt = message.params.input?.[0]?.text ?? "";
     write({ id: message.id, result: { turn: { id: "turn-fake" } } });
+    if (pendingPrompt === "HANG") return;
     if (pendingPrompt === "APPROVAL") {
       pendingApprovalId = 9001;
       write({

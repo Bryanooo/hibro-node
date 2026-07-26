@@ -160,6 +160,17 @@ sudo bash /opt/hibro-node-source/current/install.sh status
 稳定通道会校验 Release 的 SHA-256，升级失败会保留运行数据并恢复上一版本。开发联调
 可显式使用 `--channel main --allow-unverified-main`。以 root 安装时源码位于
 `/opt/hibro-node-source`；普通用户安装位于 `~/.local/share/hibro-node/source`。
+
+安装器还会提供统一的 `hibro` 运维命令：
+
+```bash
+hibro node status
+hibro node update
+hibro node restart
+hibro node logs
+```
+
+同一台机器安装了 Core 时可使用 `hibro core ...`；`hibro status` 会汇总本机组件。
 Linux 原生模式：
 
 ```bash

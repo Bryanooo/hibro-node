@@ -41,6 +41,7 @@ function makeRelease(
   );
   writeFileSync(join(source, "install.sh"), "#!/usr/bin/env bash\n");
   chmodSync(join(source, "install.sh"), 0o755);
+  writeFileSync(join(source, "scripts", "hibro"), "#!/usr/bin/env bash\n");
   writeFileSync(
     join(source, "scripts", "package-release.sh"),
     [
@@ -76,6 +77,7 @@ function makeRelease(
   );
   for (const name of [
     "package-release.sh",
+    "hibro",
     "setup.sh",
     "setup-docker.sh",
     "setup-native.sh",
@@ -113,6 +115,7 @@ test("Node one-command install uses a complete local checkout without GitHub", (
       HIBRO_INSTALL_STATE_DIR: join(root, "installer-state"),
       HIBRO_INSTALL_LATEST_ASSET_BASE_URL: "https://127.0.0.1:1/unreachable",
       HIBRO_INSTALL_DOCKER_ENV_FILE: join(root, "runtime.env"),
+      HIBRO_INSTALL_CLI_PATH: join(root, "bin", "hibro"),
       HIBRO_TEST_SETUP_LOG: join(root, "setup.log"),
     },
   });
@@ -141,6 +144,7 @@ function runInstaller(
       HIBRO_INSTALL_DOCKER_ENV_FILE: join(root, "hibro-node.env"),
       HIBRO_INSTALL_RELEASE_BASE_URL: `file://${assetDirectory}`,
       HIBRO_INSTALL_ALLOW_FILE_URL: "true",
+      HIBRO_INSTALL_CLI_PATH: join(root, "bin", "hibro"),
       HIBRO_TEST_SETUP_LOG: join(root, "setup.log"),
       ...extraEnv,
     },

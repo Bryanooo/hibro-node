@@ -177,7 +177,7 @@ if [[ "${EUID}" -ne 0 &&
       ("${source_root}" == /opt/* || "${state_dir}" == /var/lib/*) ]]; then
   fail "默认安装目录需要管理员权限，请使用 sudo。"
 fi
-for command_name in tar awk grep mktemp; do
+for command_name in tar awk grep mktemp install; do
   command -v "${command_name}" >/dev/null 2>&1 ||
     fail "缺少安装工具：${command_name}"
 done
@@ -237,7 +237,7 @@ download() {
 is_local_source="true"
 for local_required_path in \
   VERSION package.json package-lock.json install.sh compose.yaml Dockerfile \
-  scripts/package-release.sh scripts/setup.sh scripts/setup-docker.sh \
+  scripts/hibro scripts/package-release.sh scripts/setup.sh scripts/setup-docker.sh \
   scripts/setup-native.sh deploy/hibro-node.service.template; do
   if [[ ! -f "${installer_dir}/${local_required_path}" ]]; then
     is_local_source="false"
@@ -347,7 +347,7 @@ fi
 
 for required_path in \
   VERSION package.json package-lock.json install.sh compose.yaml Dockerfile \
-  scripts/setup.sh scripts/setup-docker.sh scripts/setup-native.sh \
+  scripts/hibro scripts/setup.sh scripts/setup-docker.sh scripts/setup-native.sh \
   deploy/hibro-node.service.template; do
   [[ -f "${candidate_dir}/${required_path}" ]] ||
     fail "发布包缺少必要文件：${required_path}"
@@ -443,6 +443,18 @@ if [[ -n "${docker_rollback_image}" ]]; then
   docker image rm "${docker_rollback_image}" >/dev/null 2>&1 || true
 fi
 
+if [[ -n "${HIBRO_INSTALL_CLI_PATH:-}" ]]; then
+  cli_path="${HIBRO_INSTALL_CLI_PATH}"
+elif [[ "${EUID}" -eq 0 ]]; then
+  cli_path="/usr/local/bin/hibro"
+else
+  cli_path="${HOME}/.local/bin/hibro"
+fi
+[[ "${cli_path}" == /* && "${cli_path}" != *$'\n'* &&
+   "${cli_path}" != *$'\r'* ]] || fail "CLI 安装路径必须是合法的绝对路径。"
+install -d -m 0755 "$(dirname -- "${cli_path}")"
+install -m 0755 "${release_dir}/scripts/hibro" "${cli_path}"
+
 installed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 state_temp="${state_file}.tmp.$$"
 (
@@ -454,6 +466,7 @@ state_temp="${state_file}.tmp.$$"
     printf 'CHANNEL=%s\n' "${channel}"
     printf 'REPOSITORY=%s\n' "${repository}"
     printf 'RELEASE_DIR=%s\n' "${release_dir}"
+    printf 'CLI_PATH=%s\n' "${cli_path}"
     printf 'PREVIOUS_RELEASE_DIR=%s\n' "${previous_release}"
     printf 'INSTALLED_AT=%s\n' "${installed_at}"
   } >"${state_temp}"
@@ -462,4 +475,8 @@ mv -f "${state_temp}" "${state_file}"
 
 echo
 echo "Hibro Node ${package_version} 已安装完成。"
+echo "运维命令：hibro node status"
+if [[ "${EUID}" -ne 0 && ":${PATH}:" != *":$(dirname -- "${cli_path}"):"* ]]; then
+  echo "提示：请把 $(dirname -- "${cli_path}") 加入 PATH。"
+fi
 echo "以后升级：sudo bash ${source_root}/current/install.sh"

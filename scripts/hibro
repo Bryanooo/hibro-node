@@ -1,0 +1,252 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+original_args=("$@")
+
+usage() {
+  cat <<'EOF'
+Hibro 运维命令
+
+用法：
+  hibro status [core|node|all]
+  hibro update [core|node|all] [安装器选项]
+  hibro restart [core|node|all]
+  hibro logs [core|node] [--follow]
+  hibro version [core|node|all]
+
+也可以把组件写在前面，例如：hibro core status。
+不指定组件时，status、version、update 和 restart 会处理本机已安装的组件。
+EOF
+}
+
+fail() {
+  echo "错误：$*" >&2
+  exit 1
+}
+
+component="all"
+action="status"
+if (($# > 0)); then
+  case "$1" in
+    core|node|all)
+      component="$1"
+      shift
+      action="${1:-status}"
+      (($# == 0)) || shift
+      ;;
+    *)
+      action="$1"
+      shift
+      if (($# > 0)) && [[ "$1" == "core" || "$1" == "node" || "$1" == "all" ]]; then
+        component="$1"
+        shift
+      fi
+      ;;
+  esac
+fi
+
+case "${action}" in
+  status|update|restart|logs|version) ;;
+  help|-h|--help)
+    usage
+    exit 0
+    ;;
+  *) fail "未知操作：${action}。运行 hibro help 查看帮助。" ;;
+esac
+[[ "${component}" == "core" || "${component}" == "node" ||
+   "${component}" == "all" ]] || fail "未知组件：${component}"
+if [[ "${action}" == "logs" && "${component}" == "all" ]]; then
+  fail "查看日志时请指定 core 或 node。"
+fi
+
+user_data_home="${XDG_DATA_HOME:-${HOME}/.local/share}"
+core_state_file="${HIBRO_CORE_INSTALL_STATE_FILE:-${HIBRO_CORE_INSTALL_STATE_DIR:-/var/lib/hibro-installer}/hibro-core.env}"
+core_source_root="${HIBRO_CORE_INSTALL_SOURCE_ROOT:-/opt/hibro-core-source}"
+if [[ -f "${user_data_home}/hibro-node/installer/hibro-node.env" ]]; then
+  default_node_state_file="${user_data_home}/hibro-node/installer/hibro-node.env"
+  default_node_source_root="${user_data_home}/hibro-node/source"
+else
+  default_node_state_file="/var/lib/hibro-node-installer/hibro-node.env"
+  default_node_source_root="/opt/hibro-node-source"
+fi
+node_state_file="${HIBRO_NODE_INSTALL_STATE_FILE:-${default_node_state_file}}"
+node_source_root="${HIBRO_NODE_INSTALL_SOURCE_ROOT:-${default_node_source_root}}"
+
+needs_root="false"
+if [[ "${EUID}" -ne 0 && "${HIBRO_CLI_NO_SUDO:-false}" != "true" ]]; then
+  if [[ "${component}" == "core" ||
+        ("${component}" == "all" && -e "${core_source_root}/current/install.sh") ||
+        ("${component}" != "core" && "${node_state_file}" == /var/lib/*) ]]; then
+    needs_root="true"
+  fi
+fi
+if [[ "${needs_root}" == "true" ]]; then
+  command -v sudo >/dev/null 2>&1 ||
+    fail "该操作需要管理员权限，请使用 sudo hibro ${original_args[*]}。"
+  exec sudo -- "$0" "${original_args[@]}"
+fi
+
+read_state_value() {
+  local state_file="$1"
+  local key="$2"
+  [[ -f "${state_file}" ]] || return 0
+  awk -F= -v key="${key}" '
+    $1 == key {
+      sub(/^[^=]*=/, "")
+      value = $0
+    }
+    END { if (value != "") print value }
+  ' "${state_file}"
+}
+
+configure_component() {
+  local selected="$1"
+  if [[ "${selected}" == "core" ]]; then
+    state_file="${core_state_file}"
+    source_root="${core_source_root}"
+    service_name="${HIBRO_CORE_SERVICE_NAME:-hibro-core}"
+    compose_project="hibro-core"
+    compose_service="hibro-core"
+    default_container="${HIBRO_CORE_CONTAINER_NAME:-hibro-core-local}"
+    display_name="Hibro Core"
+  else
+    state_file="${node_state_file}"
+    source_root="${node_source_root}"
+    service_name="${HIBRO_NODE_SERVICE_NAME:-hibro-node}"
+    compose_project="hibro-node"
+    compose_service="hibro-node"
+    default_container="${HIBRO_NODE_CONTAINER_NAME:-hibro-node-local}"
+    display_name="Hibro Node"
+  fi
+}
+
+is_installed() {
+  local selected="$1"
+  configure_component "${selected}"
+  [[ -f "${state_file}" || -f "${source_root}/current/install.sh" ]]
+}
+
+find_container() {
+  local found=""
+  if command -v docker >/dev/null 2>&1; then
+    found="$(docker ps -a \
+      --filter "label=com.docker.compose.project=${compose_project}" \
+      --filter "label=com.docker.compose.service=${compose_service}" \
+      --format '{{.Names}}' 2>/dev/null | awk 'NR == 1 { print; exit }')"
+    if [[ -z "${found}" ]] &&
+       docker inspect "${default_container}" >/dev/null 2>&1; then
+      found="${default_container}"
+    fi
+  fi
+  printf '%s' "${found}"
+}
+
+show_status() {
+  local selected="$1"
+  configure_component "${selected}"
+  if ! is_installed "${selected}"; then
+    echo "${display_name}：未安装"
+    return
+  fi
+  local version mode source installed_at runtime container
+  version="$(read_state_value "${state_file}" VERSION)"
+  mode="$(read_state_value "${state_file}" MODE)"
+  source="$(read_state_value "${state_file}" SOURCE)"
+  installed_at="$(read_state_value "${state_file}" INSTALLED_AT)"
+  runtime="未知"
+  if [[ "${mode}" == "native" ]] && command -v systemctl >/dev/null 2>&1; then
+    runtime="$(systemctl is-active "${service_name}.service" 2>/dev/null || true)"
+  elif [[ "${mode}" == "docker" ]]; then
+    container="$(find_container)"
+    if [[ -n "${container}" ]]; then
+      runtime="$(docker inspect --format '{{.State.Status}}' "${container}" 2>/dev/null || true)"
+    else
+      runtime="未找到容器"
+    fi
+  fi
+  echo "${display_name}"
+  echo "  版本：${version:-未知}"
+  echo "  部署：${mode:-未知}"
+  echo "  运行：${runtime:-未知}"
+  echo "  来源：${source:-旧版安装记录}"
+  echo "  安装时间：${installed_at:-未知}"
+}
+
+run_update() {
+  local selected="$1"
+  shift
+  configure_component "${selected}"
+  local installer="${source_root}/current/install.sh"
+  [[ -f "${installer}" ]] || fail "${display_name} 没有可用的安装器。"
+  echo "正在更新 ${display_name}……"
+  bash "${installer}" "$@"
+}
+
+restart_component() {
+  local selected="$1"
+  configure_component "${selected}"
+  local mode container
+  mode="$(read_state_value "${state_file}" MODE)"
+  if [[ "${mode}" == "native" ]]; then
+    command -v systemctl >/dev/null 2>&1 || fail "未找到 systemctl。"
+    systemctl restart "${service_name}.service"
+  elif [[ "${mode}" == "docker" ]]; then
+    container="$(find_container)"
+    [[ -n "${container}" ]] || fail "未找到 ${display_name} 容器。"
+    docker restart "${container}" >/dev/null
+  else
+    fail "${display_name} 的部署模式未知。"
+  fi
+  echo "${display_name} 已重新启动。"
+}
+
+show_logs() {
+  local selected="$1"
+  shift
+  configure_component "${selected}"
+  local mode container follow=()
+  mode="$(read_state_value "${state_file}" MODE)"
+  if [[ "${1:-}" == "--follow" || "${1:-}" == "-f" ]]; then
+    follow=(-f)
+  fi
+  if [[ "${mode}" == "native" ]]; then
+    command -v journalctl >/dev/null 2>&1 || fail "未找到 journalctl。"
+    journalctl -u "${service_name}.service" -n 100 --no-pager "${follow[@]}"
+  elif [[ "${mode}" == "docker" ]]; then
+    container="$(find_container)"
+    [[ -n "${container}" ]] || fail "未找到 ${display_name} 容器。"
+    docker logs --tail 100 "${follow[@]}" "${container}"
+  else
+    fail "${display_name} 的部署模式未知。"
+  fi
+}
+
+selected_components=()
+if [[ "${component}" == "all" ]]; then
+  is_installed core && selected_components+=(core)
+  is_installed node && selected_components+=(node)
+  ((${#selected_components[@]} > 0)) || fail "没有检测到已安装的 Hibro Core 或 Node。"
+else
+  selected_components=("${component}")
+fi
+
+case "${action}" in
+  status)
+    for selected in "${selected_components[@]}"; do show_status "${selected}"; done
+    ;;
+  version)
+    for selected in "${selected_components[@]}"; do
+      configure_component "${selected}"
+      printf '%s %s\n' "${display_name}" "$(read_state_value "${state_file}" VERSION)"
+    done
+    ;;
+  update)
+    for selected in "${selected_components[@]}"; do run_update "${selected}" "$@"; done
+    ;;
+  restart)
+    for selected in "${selected_components[@]}"; do restart_component "${selected}"; done
+    ;;
+  logs)
+    show_logs "${component}" "$@"
+    ;;
+esac

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -101,7 +101,7 @@ test("workspace manager prevents concurrent writable use by one agent", async ()
     enabled: true,
     source: { type: "local" as const, path: process.cwd() },
     workspace: { strategy: "persistent" as const, access: "workspace-write" as const },
-    maxConcurrency: 1,
+    maxConcurrency: 2,
     createdAt: now,
     updatedAt: now,
   };
@@ -132,7 +132,6 @@ test("workspace manager creates, reuses and cleans isolated workspace strategies
     "-m",
     "fixture",
   ]);
-
   const manager = new WorkspaceManager(workspaceRoot);
   const now = new Date().toISOString();
   const baseAgent = {
@@ -142,7 +141,7 @@ test("workspace manager creates, reuses and cleans isolated workspace strategies
     enabled: true,
     source: { type: "local" as const, path: projectRoot },
     workspace: { strategy: "persistent" as const, access: "workspace-write" as const },
-    maxConcurrency: 2,
+    maxConcurrency: 1,
     createdAt: now,
     updatedAt: now,
   };
@@ -206,4 +205,64 @@ test("agents sharing one source still receive different private workspaces", asy
   assert.match(second.path, /agent-two\/workspace$/);
   await manager.release(firstAgent.id, "run-one", first);
   await manager.release(secondAgent.id, "run-two", second);
+});
+
+test("Git workspaces keep source metadata read-only and manage worktrees in Agent state", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hibro-readonly-source-"));
+  const projectRoot = join(root, "readonly-project");
+  const workspaceRoot = join(root, "agents");
+  await execFileAsync("git", ["init", projectRoot]);
+  await writeFile(join(projectRoot, "README.md"), "read-only source\n", "utf8");
+  await execFileAsync("git", ["-C", projectRoot, "add", "README.md"]);
+  await execFileAsync("git", [
+    "-C",
+    projectRoot,
+    "-c",
+    "user.name=Hibro Test",
+    "-c",
+    "user.email=hibro@example.invalid",
+    "commit",
+    "-m",
+    "fixture",
+  ]);
+  await chmod(join(projectRoot, ".git"), 0o555);
+
+  const manager = new WorkspaceManager(workspaceRoot);
+  const now = new Date().toISOString();
+  const agent = {
+    id: "readonly-git-agent",
+    name: "Read-only Git Agent",
+    engine: "codex" as const,
+    enabled: true,
+    source: { type: "local" as const, path: projectRoot },
+    workspace: {
+      strategy: "per-run" as const,
+      access: "workspace-write" as const,
+    },
+    maxConcurrency: 2,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  const [lease, concurrentLease] = await Promise.all([
+    manager.acquire(agent, "readonly-run"),
+    manager.acquire(agent, "readonly-run-2"),
+  ]);
+  assert.equal(lease.materialization, "git-worktree");
+  assert.equal(concurrentLease.materialization, "git-worktree");
+  assert.equal(
+    lease.gitRepositoryPath,
+    join(workspaceRoot, agent.id, "state", "source.git"),
+  );
+  await access(join(lease.path, "README.md"));
+  await access(join(concurrentLease.path, "README.md"));
+  await assert.rejects(() => access(join(projectRoot, ".git", "worktrees")));
+  await Promise.all([
+    manager.release(agent.id, "readonly-run", lease),
+    manager.release(agent.id, "readonly-run-2", concurrentLease),
+  ]);
+  await Promise.all([
+    assert.rejects(() => access(lease.path)),
+    assert.rejects(() => access(concurrentLease.path)),
+  ]);
 });

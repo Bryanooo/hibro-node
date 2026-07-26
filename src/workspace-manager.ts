@@ -24,6 +24,7 @@ export class WorkspaceManager {
   private readonly rootDir: string;
   private readonly activeByAgent = new Map<string, Set<string>>();
   private readonly activeByPath = new Map<string, string>();
+  private readonly gitOperations = new Map<string, Promise<unknown>>();
 
   constructor(rootDir: string) {
     this.rootDir = resolve(rootDir);
@@ -70,6 +71,7 @@ export class WorkspaceManager {
         access: agent.workspace.access,
         path: workspace.path,
         sourcePath: agent.source.path,
+        gitRepositoryPath: workspace.gitRepositoryPath,
         statePath: paths.state,
         tempPath: paths.temp,
         materialization: workspace.materialization,
@@ -89,11 +91,16 @@ export class WorkspaceManager {
     if (lease && this.activeByPath.get(lease.path) === runId) this.activeByPath.delete(lease.path);
     if (!lease || lease.strategy === "persistent") return;
     if (lease.materialization === "git-worktree") {
+      const repositoryPath = lease.gitRepositoryPath ?? lease.sourcePath;
       try {
-        await this.git(lease.sourcePath, ["worktree", "remove", "--force", lease.path]);
+        await this.withGitRepository(repositoryPath, async () => {
+          await this.git(repositoryPath, ["worktree", "remove", "--force", lease.path]);
+        });
       } catch (error) {
         await rm(lease.path, { recursive: true, force: true });
-        await this.git(lease.sourcePath, ["worktree", "prune"]).catch(() => undefined);
+        await this.withGitRepository(repositoryPath, async () => {
+          await this.git(repositoryPath, ["worktree", "prune"]);
+        }).catch(() => undefined);
         throw error;
       }
       return;
@@ -109,7 +116,11 @@ export class WorkspaceManager {
     agent: AgentDefinition,
     runId: string,
     paths: AgentRuntimePaths,
-  ): Promise<{ path: string; materialization: WorkspaceLease["materialization"] }> {
+  ): Promise<{
+    path: string;
+    materialization: WorkspaceLease["materialization"];
+    gitRepositoryPath?: string | undefined;
+  }> {
     if (agent.workspace.strategy === "scratch") {
       const path = join(paths.runs, runId, "scratch");
       await mkdir(path, { recursive: true });
@@ -119,28 +130,99 @@ export class WorkspaceManager {
       agent.workspace.strategy === "persistent"
         ? paths.workspace
         : join(paths.runs, runId, "workspace");
-    return { path, materialization: await this.materialize(agent.source.path, path) };
+    return this.materialize(agent.source.path, path, paths.state);
   }
 
   private async materialize(
     sourcePath: string,
     targetPath: string,
-  ): Promise<WorkspaceLease["materialization"]> {
+    statePath: string,
+  ): Promise<{
+    path: string;
+    materialization: WorkspaceLease["materialization"];
+    gitRepositoryPath?: string | undefined;
+  }> {
     try {
       await access(targetPath);
-      return (await this.isGitWorkspace(targetPath)) ? "git-worktree" : "directory-copy";
+      const gitWorkspace = await this.isGitWorkspace(targetPath);
+      let gitRepositoryPath: string | undefined;
+      if (gitWorkspace) {
+        const managedRepositoryPath = join(statePath, "source.git");
+        try {
+          await access(join(managedRepositoryPath, "HEAD"));
+          gitRepositoryPath = managedRepositoryPath;
+        } catch {
+          gitRepositoryPath = undefined;
+        }
+      }
+      return {
+        path: targetPath,
+        materialization: gitWorkspace ? "git-worktree" : "directory-copy",
+        gitRepositoryPath,
+      };
     } catch {
       await mkdir(resolve(targetPath, ".."), { recursive: true });
     }
     if (await this.hasGitHead(sourcePath)) {
-      await this.git(sourcePath, ["worktree", "add", "--detach", targetPath, "HEAD"]);
-      return "git-worktree";
+      const gitRepositoryPath = join(statePath, "source.git");
+      try {
+        await this.withGitRepository(gitRepositoryPath, async () => {
+          await this.prepareManagedRepository(sourcePath, gitRepositoryPath);
+          await this.git(gitRepositoryPath, [
+            "worktree",
+            "add",
+            "--detach",
+            targetPath,
+            "refs/hibro/source",
+          ]);
+        });
+      } catch (error) {
+        await rm(targetPath, { recursive: true, force: true });
+        throw error;
+      }
+      return { path: targetPath, materialization: "git-worktree", gitRepositoryPath };
     }
     await cp(sourcePath, targetPath, {
       recursive: true,
       filter: (source) => basename(source) !== ".git",
     });
-    return "directory-copy";
+    return { path: targetPath, materialization: "directory-copy" };
+  }
+
+  private async prepareManagedRepository(
+    sourcePath: string,
+    repositoryPath: string,
+  ): Promise<void> {
+    try {
+      await access(join(repositoryPath, "HEAD"));
+    } catch {
+      await mkdir(repositoryPath, { recursive: true });
+      await this.git(repositoryPath, ["init", "--bare"]);
+    }
+    await this.git(repositoryPath, [
+      "fetch",
+      "--force",
+      "--no-tags",
+      sourcePath,
+      "HEAD:refs/hibro/source",
+    ]);
+    await this.git(repositoryPath, ["worktree", "prune"]);
+  }
+
+  private async withGitRepository<T>(
+    repositoryPath: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.gitOperations.get(repositoryPath) ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(operation);
+    this.gitOperations.set(repositoryPath, current);
+    try {
+      return await current;
+    } finally {
+      if (this.gitOperations.get(repositoryPath) === current) {
+        this.gitOperations.delete(repositoryPath);
+      }
+    }
   }
 
   private async hasGitHead(path: string): Promise<boolean> {

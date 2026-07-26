@@ -116,6 +116,8 @@ export interface WorkspaceLease {
   access: WorkspaceAccessMode;
   path: string;
   sourcePath: string;
+  /** Writable Git metadata used to manage an isolated worktree. */
+  gitRepositoryPath?: string | undefined;
   statePath: string;
   tempPath: string;
   materialization: "git-worktree" | "directory-copy" | "scratch";

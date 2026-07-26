@@ -89,7 +89,9 @@ HIBRO_NODE_DATA_DIR/
 | `scratch` | 每个 Run 使用空白临时目录，Run 结束后清理 |
 
 `read-only` 和 `workspace-write` 独立控制引擎权限。Git 项目使用 detached worktree
-物化，未提交或非 Git 项目使用目录复制。源项目本身不会被 Agent 直接作为运行目录。
+物化，其可写 Git 管理元数据保存在 Agent 私有 `state/source.git` 中；因此 Docker
+可以继续把初始项目挂载为只读。未提交或非 Git 项目使用目录复制。源项目本身不会被
+Agent 直接作为运行目录。
 
 每次 Run 都会保存实际的 `WorkspaceLease`。默认并发为 1；同一个私有工作目录不会
 同时分配给多个 Run。

@@ -38,15 +38,14 @@ export class WorkspaceManager {
 
   pathsFor(agentId: string): AgentRuntimePaths {
     const root = join(this.rootDir, agentId);
-    const metadata = join(root, ".hibro");
     return {
       root,
       workspace: join(root, "workspace"),
-      metadata,
-      state: join(metadata, "state"),
-      temp: join(metadata, "tmp"),
+      metadata: root,
+      state: join(root, "state"),
+      temp: join(root, "tmp"),
       artifacts: join(root, "artifacts"),
-      runs: join(metadata, "runs"),
+      runs: join(root, "runs"),
     };
   }
 

@@ -77,7 +77,7 @@ async function buildManager(config: NodeConfig): Promise<{
   return {
     manager: new RunManager({
       dataDir: layout.root,
-      store: new SqliteRunStore(layout.metadata),
+      store: new SqliteRunStore(layout.root),
       agents: new FileAgentRegistry(
         layout.agentsRegistry,
         config.defaultProjectRoot,
@@ -113,7 +113,7 @@ Environment:
   HIBRO_CLAUDE_BIN       Claude Code executable
   HIBRO_CODEX_BIN        Codex executable
   HIBRO_OPENCLAW_BIN     OpenClaw executable
-  HIBRO_NODE_DATA_DIR    Persistent run data directory
+  HIBRO_NODE_DATA_DIR    Persistent Hibro Home directory
   HIBRO_NODE_HOST        HTTP bind host
   HIBRO_NODE_PORT        HTTP bind port
   HIBRO_IMPORT_SHELL_ENV Import Claude variables from interactive shell (default: true)
@@ -183,7 +183,7 @@ async function serve(flags: Flags): Promise<void> {
   await manager.init();
   const conversations = new ConversationService(
     new ConversationStore(
-      manager.store.databasePath ?? join(config.dataDir, ".hibro", "hibro.db"),
+      manager.store.databasePath ?? join(config.dataDir, "hibro.db"),
     ),
     manager,
   );

@@ -202,7 +202,7 @@ export const CONSOLE_HTML = `<!doctype html>
                   <label><span>默认超时（秒）</span><input id="setting-timeout" type="number" min="1" required /></label>
                   <label><span>运行历史保留天数</span><input id="setting-retention" type="number" min="1" required /></label>
                 </div>
-                <label class="toggle-row"><input id="setting-auto-resume" type="checkbox" /><span><b>自动续接会话</b><small>同一 Agent 与 sessionKey 默认复用最近会话</small></span></label>
+                <label class="toggle-row"><input id="setting-auto-resume" type="checkbox" /><span><b>自动续接会话</b><small>同一 Agent、项目与 sessionKey 默认复用最近会话</small></span></label>
                 <label class="toggle-row danger-toggle"><input id="setting-dangerous" type="checkbox" /><span><b>允许 danger-full-access</b><small>关闭时所有请求都无法绕过引擎沙箱</small></span></label>
                 <div class="subsection">
                   <div class="subsection-head"><div><b>Hibro Core</b><small>启用后自动注册 Node、同步 Agent，并接收远程运行</small></div><label class="switch"><input id="setting-core-enabled" type="checkbox" /><i></i></label></div>
@@ -1378,7 +1378,7 @@ function renderWorkspaces() {
     const path = document.createElement("td");
     path.append(
       el("span", "cell-title", workspace.path),
-      el("span", "cell-sub", "实际工作位置 · 内部数据 " + workspace.metadataPath),
+      el("span", "cell-sub", "实际工作位置 · Agent Home " + workspace.metadataPath),
     );
     const permission = document.createElement("td");
     permission.textContent = accessLabel(workspace.access);
@@ -1601,12 +1601,12 @@ function updateAgentWorkspacePreview() {
   const workspacePath = runtime?.paths.workspace;
   const root = workspacePath?.endsWith("/workspace")
     ? workspacePath.slice(0, -10)
-    : (state.system?.dataDir || "~/.hibro-node") + "/agents/<系统生成 ID>";
+    : (state.system?.dataDir || "~/.hibro") + "/agents/<系统生成 ID>";
   const path = strategy === "persistent"
     ? root + "/workspace"
     : strategy === "per-run"
-      ? root + "/.hibro/runs/<run-id>/workspace"
-      : root + "/.hibro/runs/<run-id>/scratch";
+      ? root + "/runs/<run-id>/workspace"
+      : root + "/runs/<run-id>/scratch";
   byId("agent-workspace-preview").textContent =
     "Agent 实际工作位置：" + path + " · " + accessLabel(byId("agent-workspace-access").value) +
     (byId("agent-source-path").value.trim()

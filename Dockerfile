@@ -29,7 +29,7 @@ RUN chmod +x /usr/local/bin/hibro-entrypoint \
 ENV NODE_ENV=production \
     HIBRO_NODE_HOST=0.0.0.0 \
     HIBRO_NODE_PORT=7331 \
-    HIBRO_NODE_DATA_DIR=/data \
+    HIBRO_NODE_DATA_DIR=/data/.hibro \
     HIBRO_DEFAULT_PROJECT_ROOT=/workspace/project \
     HIBRO_IMPORT_SHELL_ENV=false \
     HIBRO_CONTAINER=docker \

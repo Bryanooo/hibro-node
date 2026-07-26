@@ -45,7 +45,7 @@ Agent ID 完全由 Hibro Node 生成，格式为 `agt_<UUID>`。Web 控制台和
 `POST /v1/agents` 都不接受用户指定 ID，避免命名冲突以及未来多个 Node 注册到 Core
 时发生全局冲突。
 
-首次启动会在 `HIBRO_NODE_DATA_DIR/.hibro/agents.json` 创建六个 Agent；已有数据目录会按引擎
+首次启动会在 `HIBRO_NODE_DATA_DIR/agents.json` 创建六个 Agent；已有数据目录会按引擎
 补足到每种两个，不删除已有 Agent，也不改变已有 ID：
 
 | Agent | 引擎 | 生命周期 | 权限 |
@@ -72,16 +72,17 @@ Agent 本身不等于代码项目。“默认项目”是可选项，对应 Agen
 
 ```text
 HIBRO_NODE_DATA_DIR/
-  .hibro/              # Node 内部元数据（SQLite、设置、Agent 注册表）
+  hibro.db             # SQLite
+  settings.json        # Node 设置
+  agents.json          # Agent 注册表
   agents/
     <agent-id>/
       workspace/       # persistent 生命周期
       artifacts/       # 可预览、可同步的 Agent 产出
-      .hibro/           # 此 Agent 的内部元数据
-        state/          # 引擎状态、会话和 Git 管理仓库
-        tmp/            # 临时文件
-        runs/
-          <run-id>/     # per-run、scratch 或 Run 临时项目
+      state/           # 引擎状态、会话和 Git 管理仓库
+      tmp/             # 临时文件
+      runs/
+        <run-id>/      # per-run、scratch 或 Run 临时项目
 ```
 
 | 生命周期 | 用途 |
@@ -91,11 +92,11 @@ HIBRO_NODE_DATA_DIR/
 | `scratch` | 每个 Run 使用空白临时目录，Run 结束后清理 |
 
 `read-only` 和 `workspace-write` 独立控制引擎权限。Git 项目使用 detached worktree
-物化，其可写 Git 管理元数据保存在 Agent 私有 `.hibro/state/source.git` 中；因此
+物化，其可写 Git 管理元数据保存在 Agent 私有 `state/source.git` 中；因此
 Docker 可以继续把项目挂载为只读。未提交或非 Git 项目使用目录复制。没有项目时会
 创建普通空目录。
 
-Run 级项目总是进入 `.hibro/runs/<run-id>/workspace`，Run 结束后清理，不会覆盖
+Run 级项目总是进入 `runs/<run-id>/workspace`，Run 结束后清理，不会覆盖
 Agent 长期使用的 `workspace/`。这让同一个 Agent 可以先做普通问答，再临时处理不同
 项目。
 
@@ -320,12 +321,15 @@ POST   /v1/capabilities/refresh
 ## 数据存储
 
 生产运行使用 Node.js 内置 SQLite，数据库为
-`HIBRO_NODE_DATA_DIR/.hibro/hibro.db`。Run、顺序事件、产物同步状态与 Core Outbox 使用事务表，
+`HIBRO_NODE_DATA_DIR/hibro.db`。Run、顺序事件、产物同步状态与 Core Outbox 使用事务表，
 数据库启用 WAL；Agent 定义和系统设置暂时保留为可读、易备份的 JSON。
 
-旧版根目录中的数据库、JSON 与 Run 元数据会在启动时原地迁移进 `.hibro/`；Agent
-原有的 `state/`、`tmp/` 和 `runs/` 也会迁入各自的 `.hibro/`，而 `workspace/` 和
-`artifacts/` 保持原位。迁移不会覆盖已经存在的新目录，并会修复 Git worktree 指针。
+`HIBRO_NODE_DATA_DIR` 表示完整的 Hibro Home。Docker 使用 `/data/.hibro`，直接运行
+时默认使用 `~/.hibro`，所有数据库、Agent 工作空间和产物都位于这一个目录下。
+
+早期版本的 `/data/.hibro + /data/agents`、`~/.hibro-node` 和嵌套 Agent `.hibro`
+目录会在启动时自动合并。迁移不会覆盖已经存在的新目录，并会修复 Git worktree 的
+仓库与工作空间指针。
 这个混合方案适合单机 Hibro Node；只有未来让多个 Node 实例共享同一运行数据库时，
 才需要考虑 PostgreSQL 等外部数据库。设计决策见
 [`docs/adr-0001-sqlite-storage.md`](docs/adr-0001-sqlite-storage.md)。
@@ -336,7 +340,7 @@ POST   /v1/capabilities/refresh
 |---|---|---|
 | `HIBRO_NODE_HOST` | `127.0.0.1` | HTTP 监听地址 |
 | `HIBRO_NODE_PORT` | `7331` | HTTP 监听端口 |
-| `HIBRO_NODE_DATA_DIR` | `~/.hibro-node` | Agent、Run、事件和 Workspace 数据 |
+| `HIBRO_NODE_DATA_DIR` | `~/.hibro` | 完整 Hibro Home；Docker 中为 `/data/.hibro` |
 | `HIBRO_DEFAULT_PROJECT_ROOT` | 当前目录 | 兼容旧安装；Docker 中可挂载项目的容器路径 |
 | `HIBRO_CLAUDE_BIN` | 自动发现 | Claude Code CLI |
 | `HIBRO_CODEX_BIN` | `codex` | Codex CLI |

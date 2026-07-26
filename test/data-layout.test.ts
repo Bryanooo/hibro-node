@@ -5,46 +5,82 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { migrateNodeDataLayout } from "../src/data-layout.ts";
 
-test("legacy global and Agent metadata moves into .hibro without touching user files", async () => {
-  const root = await mkdtemp(join(tmpdir(), "hibro-layout-"));
-  const agentRoot = join(root, "agents", "agent-one");
-  const oldState = join(agentRoot, "state");
-  const workspace = join(agentRoot, "workspace");
-  await mkdir(join(oldState, "source.git", "worktrees", "workspace"), {
-    recursive: true,
-  });
-  await mkdir(workspace, { recursive: true });
-  await mkdir(join(agentRoot, "artifacts"), { recursive: true });
-  await writeFile(join(root, "settings.json"), '{"nodeName":"legacy"}\n');
-  await writeFile(join(root, "agents.json"), "[]\n");
-  await writeFile(join(root, "hibro.db"), "database");
-  await writeFile(join(agentRoot, "artifacts", "report.md"), "keep me");
-  await writeFile(
-    join(workspace, ".git"),
-    `gitdir: ${resolve(oldState)}/source.git/worktrees/workspace\n`,
-  );
+test("Docker metadata and Agent homes consolidate beneath /data/.hibro", async () => {
+  const volume = await mkdtemp(join(tmpdir(), "hibro-docker-layout-"));
+  const home = join(volume, ".hibro");
+  const oldAgent = join(volume, "agents", "agent-one");
+  const oldState = join(oldAgent, ".hibro", "state");
+  const oldWorkspace = join(oldAgent, "workspace");
+  await createGitPointerFixture(oldState, oldWorkspace);
+  await mkdir(join(oldAgent, "artifacts"), { recursive: true });
+  await mkdir(home, { recursive: true });
+  await writeFile(join(home, "settings.json"), '{"nodeName":"docker"}\n');
+  await writeFile(join(home, "agents.json"), "[]\n");
+  await writeFile(join(home, "hibro.db"), "database");
+  await writeFile(join(oldAgent, "artifacts", "report.md"), "keep me");
 
-  const layout = await migrateNodeDataLayout(root);
+  const layout = await migrateNodeDataLayout(home);
+  const agent = join(layout.agentsRoot, "agent-one");
 
-  assert.equal(await readFile(layout.settings, "utf8"), '{"nodeName":"legacy"}\n');
-  assert.equal(await readFile(layout.agentsRegistry, "utf8"), "[]\n");
-  assert.equal(await readFile(layout.database, "utf8"), "database");
+  assert.equal(layout.root, resolve(home));
+  assert.equal(await readFile(layout.settings, "utf8"), '{"nodeName":"docker"}\n');
+  assert.equal(await readFile(join(agent, "artifacts", "report.md"), "utf8"), "keep me");
+  await access(join(agent, "state", "source.git"));
+  await assert.rejects(() => access(oldAgent));
+  await assert.rejects(() => access(join(agent, ".hibro")));
   assert.equal(
-    await readFile(join(agentRoot, "artifacts", "report.md"), "utf8"),
-    "keep me",
+    await readFile(join(agent, "workspace", ".git"), "utf8"),
+    `gitdir: ${resolve(agent, "state", "source.git", "worktrees", "workspace")}\n`,
   );
-  assert.match(
-    await readFile(join(workspace, ".git"), "utf8"),
-    new RegExp(`${escapeRegExp(resolve(agentRoot, ".hibro", "state"))}/source\\.git`),
+  assert.equal(
+    await readFile(
+      join(agent, "state", "source.git", "worktrees", "workspace", "gitdir"),
+      "utf8",
+    ),
+    `${resolve(agent, "workspace", ".git")}\n`,
   );
-  await access(join(agentRoot, ".hibro", "state", "source.git"));
-  await assert.rejects(() => access(oldState));
 
-  // The migration is idempotent.
-  await migrateNodeDataLayout(root);
+  await migrateNodeDataLayout(home);
   assert.equal(await readFile(layout.database, "utf8"), "database");
 });
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+test("the native ~/.hibro default imports the previous ~/.hibro-node layout", async () => {
+  const userHome = await mkdtemp(join(tmpdir(), "hibro-native-layout-"));
+  const oldHome = join(userHome, ".hibro-node");
+  const oldMetadata = join(oldHome, ".hibro");
+  const oldAgent = join(oldHome, "agents", "agent-native");
+  const oldState = join(oldAgent, ".hibro", "state");
+  const oldWorkspace = join(oldAgent, "workspace");
+  await createGitPointerFixture(oldState, oldWorkspace);
+  await mkdir(oldMetadata, { recursive: true });
+  await writeFile(join(oldMetadata, "settings.json"), '{"nodeName":"native"}\n');
+  await writeFile(join(oldMetadata, "agents.json"), "[]\n");
+  await writeFile(join(oldMetadata, "hibro.db"), "native-database");
+
+  const layout = await migrateNodeDataLayout(join(userHome, ".hibro"));
+  const agent = join(layout.agentsRoot, "agent-native");
+
+  assert.equal(await readFile(layout.database, "utf8"), "native-database");
+  assert.equal(await readFile(layout.settings, "utf8"), '{"nodeName":"native"}\n');
+  await access(join(agent, "workspace"));
+  await access(join(agent, "state", "source.git"));
+  await assert.rejects(() => access(join(agent, ".hibro")));
+  assert.equal(
+    await readFile(join(agent, "workspace", ".git"), "utf8"),
+    `gitdir: ${resolve(agent, "state", "source.git", "worktrees", "workspace")}\n`,
+  );
+});
+
+async function createGitPointerFixture(
+  state: string,
+  workspace: string,
+): Promise<void> {
+  const worktree = join(state, "source.git", "worktrees", "workspace");
+  await mkdir(worktree, { recursive: true });
+  await mkdir(workspace, { recursive: true });
+  await writeFile(
+    join(workspace, ".git"),
+    `gitdir: ${resolve(worktree)}\n`,
+  );
+  await writeFile(join(worktree, "gitdir"), `${resolve(workspace, ".git")}\n`);
 }

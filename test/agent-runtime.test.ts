@@ -253,7 +253,7 @@ test("Git workspaces keep source metadata read-only and manage worktrees in Agen
   assert.equal(concurrentLease.materialization, "git-worktree");
   assert.equal(
     lease.gitRepositoryPath,
-    join(workspaceRoot, agent.id, ".hibro", "state", "source.git"),
+    join(workspaceRoot, agent.id, "state", "source.git"),
   );
   await access(join(lease.path, "README.md"));
   await access(join(concurrentLease.path, "README.md"));
@@ -290,7 +290,7 @@ test("an Agent without a project starts empty and can attach a project per Run",
   assert.equal(empty.materialization, "empty");
   assert.equal(empty.sourcePath, undefined);
   assert.equal(empty.path, join(root, "agents", agent.id, "workspace"));
-  assert.equal(empty.statePath, join(root, "agents", agent.id, ".hibro", "state"));
+  assert.equal(empty.statePath, join(root, "agents", agent.id, "state"));
   await manager.release(agent.id, "empty-run", empty);
 
   const attached = await manager.acquire(
@@ -302,7 +302,7 @@ test("an Agent without a project starts empty and can attach a project per Run",
   assert.equal(attached.sourcePath, source);
   assert.equal(
     attached.path,
-    join(root, "agents", agent.id, ".hibro", "runs", "attached-run", "workspace"),
+    join(root, "agents", agent.id, "runs", "attached-run", "workspace"),
   );
   await access(join(attached.path, "brief.md"));
   await manager.release(agent.id, "attached-run", attached);

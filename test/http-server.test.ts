@@ -224,7 +224,7 @@ test("Agent API generates IDs, exposes private paths and reports Core registrati
   };
   assert.equal(attachedRun.workspace.strategy, "per-run");
   assert.equal(attachedRun.workspace.sourcePath, source);
-  assert.match(attachedRun.workspace.path, new RegExp(`\\.hibro/runs/${attachedRun.id}/workspace$`));
+  assert.match(attachedRun.workspace.path, new RegExp(`/runs/${attachedRun.id}/workspace$`));
   await manager.waitForTerminal(attachedRun.id);
 
   const elevatedRun = await fetch(`${base}/v1/runs`, {

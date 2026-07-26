@@ -4,7 +4,7 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_dir="$(cd -- "${script_dir}/.." && pwd)"
 install_dir="${HIBRO_NATIVE_INSTALL_DIR:-/opt/hibro-node}"
-data_dir="${HIBRO_NATIVE_DATA_DIR:-/var/lib/hibro-node}"
+data_dir="${HIBRO_NATIVE_DATA_DIR:-}"
 config_dir="${HIBRO_NATIVE_CONFIG_DIR:-/etc/hibro-node}"
 systemd_dir="${HIBRO_NATIVE_SYSTEMD_DIR:-/etc/systemd/system}"
 service_name="${HIBRO_NATIVE_SERVICE_NAME:-hibro-node}"
@@ -96,6 +96,14 @@ service_user="${service_user_arg:-${SUDO_USER:-$(id -un)}}"
 id -u "${service_user}" >/dev/null 2>&1 ||
   { echo "服务用户不存在：${service_user}" >&2; exit 1; }
 service_group="$(id -gn "${service_user}")"
+service_home=""
+if command -v getent >/dev/null 2>&1; then
+  service_home="$(getent passwd "${service_user}" | awk -F: '{print $6}')"
+fi
+if [[ -z "${service_home}" && "${service_user}" == "$(id -un)" ]]; then
+  service_home="${HOME}"
+fi
+service_home="${service_home:-/var/lib/hibro-node}"
 node_binary="$(command -v node)"
 if [[ "${skip_systemd}" != "true" &&
       ("${node_binary}" == /root/* || "${node_binary}" == /home/*) ]]; then
@@ -143,6 +151,8 @@ prompt_value() {
   printf '%s' "${value:-${default_value}}"
 }
 
+existing_data_dir="$(read_env_value HIBRO_NODE_DATA_DIR)"
+data_dir="${data_dir:-${existing_data_dir:-${service_home}/.hibro}}"
 node_port="${port_arg:-$(read_env_value HIBRO_NODE_PORT)}"
 project_root="${project_root_arg:-$(read_env_value HIBRO_DEFAULT_PROJECT_ROOT)}"
 node_port="${node_port:-$(prompt_value "Node 本机访问端口" "7331")}"

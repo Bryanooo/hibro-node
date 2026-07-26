@@ -68,7 +68,7 @@ export function loadConfig(overrides: Partial<NodeConfig> = {}): NodeConfig {
     dataDir:
       overrides.dataDir ??
       process.env.HIBRO_NODE_DATA_DIR ??
-      resolve(homedir(), ".hibro-node"),
+      resolve(homedir(), ".hibro"),
     claudeExecutable:
       overrides.claudeExecutable ??
       discoverClaudeExecutable(),

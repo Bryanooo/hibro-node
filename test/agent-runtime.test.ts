@@ -25,7 +25,13 @@ test("agent registry seeds isolated Claude and Codex agents and generates IDs", 
     ),
     { "claude-code": 2, codex: 2, openclaw: 2 },
   );
-  assert.ok(defaults.every((agent) => /^agt_[0-9a-hjkmnp-tv-z]{26}$/.test(agent.id)));
+  assert.ok(
+    defaults.every((agent) =>
+      /^agt_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+        agent.id,
+      ),
+    ),
+  );
   assert.ok(defaults.every((agent) => agent.workspace.strategy === "persistent"));
 
   const created = await registry.create({
@@ -36,7 +42,10 @@ test("agent registry seeds isolated Claude and Codex agents and generates IDs", 
     workspace: { strategy: "persistent", access: "read-only" },
     maxConcurrency: 1,
   });
-  assert.match(created.id, /^agt_[0-9a-hjkmnp-tv-z]{26}$/);
+  assert.match(
+    created.id,
+    /^agt_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+  );
   const persisted = JSON.parse(await readFile(path, "utf8")) as Array<{ id: string }>;
   assert.ok(persisted.some((agent) => agent.id === created.id));
   assert.equal(await registry.delete(created.id), true);

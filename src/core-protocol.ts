@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import type {
   AgentDefinition,
   AgentRuntime,
@@ -12,6 +11,7 @@ import type {
   ConversationDetail,
   ConversationEvent,
 } from "./conversation-domain.ts";
+import { createId } from "./identity.ts";
 
 export const HIBRO_CORE_PROTOCOL = "hibro.node.v1" as const;
 
@@ -357,7 +357,7 @@ export function createCoreEnvelope<TType extends CoreMessageType, TPayload>(
 ): CoreEnvelope<TType, TPayload> {
   return {
     protocol: HIBRO_CORE_PROTOCOL,
-    messageId: randomUUID(),
+    messageId: createId("evt"),
     type,
     sentAt: new Date().toISOString(),
     ...fields,

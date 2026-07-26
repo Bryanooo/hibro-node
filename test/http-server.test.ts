@@ -181,7 +181,10 @@ test("Agent API generates IDs, exposes private paths and reports Core registrati
   });
   assert.equal(createdResponse.status, 201);
   const created = (await createdResponse.json()) as { id: string };
-  assert.match(created.id, /^agt_[0-9a-hjkmnp-tv-z]{26}$/);
+  assert.match(
+    created.id,
+    /^agt_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+  );
   assert.notEqual(created.id, "client-supplied-id-is-ignored");
 
   const elevatedRun = await fetch(`${base}/v1/runs`, {

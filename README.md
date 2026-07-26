@@ -34,9 +34,14 @@ Node 负责：
 Core 负责 Team、跨节点路由、策略和全局产出索引。Node 可独立运行，也可以主动通过
 `hibro.node.v1` WebSocket 连接 Hibro Core。
 
-## Agent ID 与默认 Agent
+## ID 与默认 Agent
 
-Agent ID 完全由 Hibro Node 生成，格式为 `agt_<ULID>`。Web 控制台和
+所有新业务 ID 都使用统一的“类型前缀 + 标准 UUID”格式，例如
+`node_<UUID>`、`agt_<UUID>`、`run_<UUID>`、`conv_<UUID>`。生成逻辑集中在一个小型
+工具中，不再自行实现 ULID 编码。旧数据中的 ULID 或无前缀 Run ID 继续有效，不需要
+迁移。
+
+Agent ID 完全由 Hibro Node 生成，格式为 `agt_<UUID>`。Web 控制台和
 `POST /v1/agents` 都不接受用户指定 ID，避免命名冲突以及未来多个 Node 注册到 Core
 时发生全局冲突。
 
@@ -122,6 +127,49 @@ Node「系统配置」中填写 Core URL 和该注册码。Core 接受注册后�
 - 系统配置：并发、超时、会话续接、安全策略、历史保留与 Core 目标
 
 控制台为响应式页面，弹窗支持关闭按钮、取消、`Escape` 和点击遮罩关闭。
+
+## 一键安装与升级
+
+Node 可以不配置 Core 独立完成安装和运行。macOS、家庭设备以及希望隔离三种 Agent
+CLI 的场景推荐 Docker；Linux 服务器也可选择 Native systemd。
+
+从当前源码安装：
+
+```bash
+./scripts/setup.sh --mode docker
+```
+
+从公开 GitHub Release 匿名安装（不要求 GitHub 账号）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Bryanooo/hibro-node/main/install.sh \
+  | bash -s -- install --mode docker
+```
+
+脚本依次确认本机访问端口和 Agent 初始项目目录，随后创建权限为 `600` 的环境文件、
+构建镜像、启动服务并执行健康检查。它不会要求 Core 地址或注册码；需要接入 Core 时，
+在 Node 控制台的“系统配置”中填写即可。
+
+升级和查看状态：
+
+```bash
+~/.local/share/hibro-node/source/current/install.sh update
+~/.local/share/hibro-node/source/current/install.sh status
+```
+
+稳定通道会校验 Release 的 SHA-256，升级失败会保留运行数据并恢复上一版本。开发联调
+可显式使用 `--channel main --allow-unverified-main`。以 root 安装时源码位于
+`/opt/hibro-node-source`；普通用户安装位于 `~/.local/share/hibro-node/source`。
+Linux 原生模式：
+
+```bash
+sudo ./scripts/setup.sh --mode native \
+  --service-user "$USER" \
+  --project-root /absolute/path/to/project
+```
+
+Native 会安装固定版本的 Claude Code、Codex 和 OpenClaw CLI，并建立 systemd 服务；
+CLI 登录信息归服务用户所有。Node 始终只监听 `127.0.0.1`，不建议直接暴露公网。
 
 ## HTTP API
 
@@ -326,7 +374,7 @@ Docker 连接本机 Core 的典型配置为：
 
 ```text
 Core URL: ws://host.docker.internal:17400
-Node Token: 与 HIBRO_CORE_NODE_TOKEN 相同
+Core 一次性注册码: 登录 Core 后在“Nodes → 接入我的 Node”生成
 ```
 
 ## 品牌资产

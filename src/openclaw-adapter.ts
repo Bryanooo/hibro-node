@@ -1,5 +1,4 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import { access, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -11,6 +10,7 @@ import {
 } from "./engine-adapter.ts";
 import { writeJsonAtomically } from "./storage.ts";
 import { selectEngineEnvironment } from "./engine-environment.ts";
+import { createId } from "./identity.ts";
 
 interface CommandResult {
   exitCode: number;
@@ -99,7 +99,7 @@ export class OpenClawAdapter implements AgentEngineAdapter {
         "OpenClaw requires an Agent-private state directory",
       );
     }
-    const runId = input.runId ?? randomUUID();
+    const runId = input.runId ?? createId("run");
     const requestsHostExecution =
       input.options?.sandbox === "danger-full-access" ||
       (input.options?.allowedTools ?? []).some((tool) =>

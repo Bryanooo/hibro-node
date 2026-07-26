@@ -1,6 +1,7 @@
 export * from "./domain.ts";
 export * from "./config.ts";
 export * from "./storage.ts";
+export * from "./identity.ts";
 export * from "./claude-code-adapter.ts";
 export * from "./codex-adapter.ts";
 export * from "./openclaw-adapter.ts";

@@ -1,8 +1,8 @@
 import { access, cp, mkdir, rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { basename, join, resolve } from "node:path";
-import { randomUUID } from "node:crypto";
 import type { AgentDefinition, WorkspaceLease } from "./domain.ts";
+import { createId } from "./identity.ts";
 
 export class WorkspaceBusyError extends Error {
   constructor(agentId: string) {
@@ -65,7 +65,7 @@ export class WorkspaceManager {
       if (this.activeByPath.has(workspace.path)) throw new WorkspaceBusyError(agent.id);
       this.activeByPath.set(workspace.path, runId);
       return {
-        id: randomUUID(),
+        id: createId("lease"),
         strategy: agent.workspace.strategy,
         access: agent.workspace.access,
         path: workspace.path,

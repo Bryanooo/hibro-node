@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import type { RunEvent, RunRecord } from "./domain.ts";
 import type {
@@ -11,6 +10,7 @@ import type {
 } from "./conversation-domain.ts";
 import { ConversationStore } from "./conversation-store.ts";
 import type { RunManager } from "./run-manager.ts";
+import { createId } from "./identity.ts";
 
 export interface CreateConversationInput {
   id?: string;
@@ -79,7 +79,7 @@ export class ConversationService {
     if (!agent.enabled) throw new Error(`Agent ${input.agentId} is disabled`);
     const now = new Date().toISOString();
     const conversation: Conversation = {
-      id: input.id?.trim() || `conv_${randomUUID()}`,
+      id: input.id?.trim() || createId("conv"),
       title: input.title?.trim() || agent.name,
       agentId: agent.id,
       engine: agent.engine,
@@ -116,7 +116,7 @@ export class ConversationService {
     this.pendingMessages.add(conversationId);
     const now = new Date().toISOString();
     const userMessage: ConversationMessage = {
-      id: input.userMessageId?.trim() || `msg_${randomUUID()}`,
+      id: input.userMessageId?.trim() || createId("msg"),
       conversationId,
       role: "user",
       content,
@@ -125,7 +125,7 @@ export class ConversationService {
       updatedAt: now,
     };
     const assistantMessage: ConversationMessage = {
-      id: input.assistantMessageId?.trim() || `msg_${randomUUID()}`,
+      id: input.assistantMessageId?.trim() || createId("msg"),
       conversationId,
       role: "assistant",
       content: "",

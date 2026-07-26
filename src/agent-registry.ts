@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto";
 import { mkdir, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import {
@@ -11,8 +10,7 @@ import {
   type WorkspaceMode,
 } from "./domain.ts";
 import { writeJsonAtomically } from "./storage.ts";
-
-const CROCKFORD_BASE32 = "0123456789abcdefghjkmnpqrstvwxyz";
+import { createId } from "./identity.ts";
 
 type CreateAgentInput = Omit<AgentDefinition, "id" | "createdAt" | "updatedAt">;
 
@@ -41,35 +39,8 @@ function validateId(id: string): void {
   }
 }
 
-function encodeTime(timestamp: number): string {
-  let value = timestamp;
-  let encoded = "";
-  for (let index = 0; index < 10; index += 1) {
-    encoded = CROCKFORD_BASE32[value % 32] + encoded;
-    value = Math.floor(value / 32);
-  }
-  return encoded;
-}
-
-function encodeRandom(): string {
-  const bytes = randomBytes(10);
-  let bits = 0;
-  let bitCount = 0;
-  let encoded = "";
-  for (const byte of bytes) {
-    bits = (bits << 8) | byte;
-    bitCount += 8;
-    while (bitCount >= 5) {
-      bitCount -= 5;
-      encoded += CROCKFORD_BASE32[(bits >>> bitCount) & 31];
-    }
-    bits &= bitCount === 0 ? 0 : (1 << bitCount) - 1;
-  }
-  return encoded;
-}
-
-export function createAgentId(now = Date.now()): string {
-  return `agt_${encodeTime(now)}${encodeRandom()}`;
+export function createAgentId(): string {
+  return createId("agt");
 }
 
 function migrateWorkspace(mode?: WorkspaceMode): AgentWorkspaceConfig {

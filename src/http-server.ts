@@ -114,7 +114,7 @@ function runRoute(
   pathname: string,
 ): { runId: string; action?: string | undefined } | undefined {
   const match = pathname.match(
-    /^\/v1\/runs\/([a-f0-9-]{36})(?:\/(events|cancel))?$/i,
+    /^\/v1\/runs\/((?:run_)?[a-f0-9-]{36})(?:\/(events|cancel))?$/i,
   );
   return match
     ? { runId: match[1] as string, action: match[2] as string | undefined }
@@ -599,7 +599,7 @@ export function createHibroHttpServer(options: HttpServerOptions): Server {
         return;
       }
       const approvalRoute = url.pathname.match(
-        /^\/v1\/runs\/([a-f0-9-]{36})\/approval\/([^/]+)$/i,
+        /^\/v1\/runs\/((?:run_)?[a-f0-9-]{36})\/approval\/([^/]+)$/i,
       );
       if (approvalRoute && request.method === "POST") {
         const body = (await readJsonBody(request)) as {

@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { arch, platform } from "node:os";
 import WebSocket from "ws";
@@ -12,6 +11,7 @@ import type { RunManager } from "./run-manager.ts";
 import type { ConversationService } from "./conversation-service.ts";
 import type { ConversationEvent } from "./conversation-domain.ts";
 import type { ArtifactRecord } from "./domain.ts";
+import { createId } from "./identity.ts";
 
 export class CoreTransport {
   private readonly manager: RunManager;
@@ -26,7 +26,7 @@ export class CoreTransport {
   private incomingSequence = 0;
   private processing = Promise.resolve();
   private resumeToken: string | undefined;
-  private instanceId = randomUUID();
+  private instanceId = createId("inst");
   private lastFingerprint = "";
   private artifactSyncRequired = true;
   private readonly uploadingArtifacts = new Set<string>();

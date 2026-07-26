@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, readdir, stat } from "node:fs/promises";
 import { basename, extname, join, relative, resolve } from "node:path";
@@ -29,6 +29,7 @@ import { FileAgentRegistry } from "./agent-registry.ts";
 import type { ArtifactSyncRecord, RunStore } from "./storage.ts";
 import { WorkspaceManager } from "./workspace-manager.ts";
 import { FileSettingsStore } from "./settings-store.ts";
+import { createId } from "./identity.ts";
 
 export interface RunManagerOptions {
   store: RunStore;
@@ -120,7 +121,7 @@ export class RunManager {
     const adapter = this.engines.get(agent.engine);
     if (!adapter) throw new Error(`Engine adapter is not available: ${agent.engine}`);
     this.reserveRunSlot(agent, settings.maxConcurrentRuns);
-    const runId = randomUUID();
+    const runId = createId("run");
     let lease: RunRecord["workspace"];
     try {
       lease = await this.workspaces.acquire(agent, runId);

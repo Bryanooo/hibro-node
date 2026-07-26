@@ -5,7 +5,11 @@ import { DatabaseSync } from "node:sqlite";
 import type { RunEvent, RunRecord } from "./domain.ts";
 
 function assertSafeRunId(runId: string): void {
-  if (!/^[a-f0-9-]{36}$/i.test(runId)) {
+  if (
+    !/^(?:run_)?[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      runId,
+    )
+  ) {
     throw new Error("Invalid run ID");
   }
 }

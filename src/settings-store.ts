@@ -1,9 +1,9 @@
 import { readFile } from "node:fs/promises";
 import { hostname } from "node:os";
-import { randomUUID } from "node:crypto";
 import type { SystemSettings } from "./domain.ts";
 import { writeJsonAtomically } from "./storage.ts";
 import { isIP } from "node:net";
+import { createId } from "./identity.ts";
 
 export class FileSettingsStore {
   private readonly path: string;
@@ -41,7 +41,7 @@ export class FileSettingsStore {
   private defaults(): SystemSettings {
     return {
       nodeName: hostname(),
-      nodeId: `node_${randomUUID()}`,
+      nodeId: createId("node"),
       defaultTimeoutMs: 300_000,
       maxConcurrentRuns: 4,
       allowDangerousSandbox: false,

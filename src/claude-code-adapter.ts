@@ -2,7 +2,6 @@ import { access } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { createServer, type Server } from "node:http";
-import { randomUUID } from "node:crypto";
 import type { EngineType } from "./domain.ts";
 import {
   EngineProcessError,
@@ -12,6 +11,7 @@ import {
   type EngineExecutionResult,
 } from "./engine-adapter.ts";
 import { selectEngineEnvironment } from "./engine-environment.ts";
+import { createId, createSecret } from "./identity.ts";
 
 export interface ClaudeAdapterOptions {
   executable?: string;
@@ -265,7 +265,7 @@ export class ClaudeCodeAdapter implements AgentEngineAdapter {
     settings: string;
     close: () => Promise<void>;
   }> {
-    const token = randomUUID();
+    const token = createSecret("hook", 24);
     const server = createServer(async (request, response) => {
       try {
         if (
@@ -298,7 +298,7 @@ export class ClaudeCodeAdapter implements AgentEngineAdapter {
         const externalId =
           typeof payload.tool_use_id === "string"
             ? payload.tool_use_id
-            : randomUUID();
+            : createId("apr");
         const command =
           typeof toolInput.command === "string" ? toolInput.command : undefined;
         const decision = await input.requestApproval!({

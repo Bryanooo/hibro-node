@@ -16,7 +16,8 @@
     "check": "node --experimental-strip-types scripts/check.ts",
     "typecheck": "tsc --noEmit",
     "validate": "npm run typecheck && npm run check && npm test",
-    "smoke:claude": "node --experimental-strip-types scripts/real-claude-smoke.ts"
+    "smoke:claude": "node --experimental-strip-types scripts/real-claude-smoke.ts",
+    "release:package": "bash scripts/package-release.sh"
   },
   "dependencies": {
     "ws": "^8.18.3"

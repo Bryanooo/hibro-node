@@ -7,7 +7,7 @@ services:
         CODEX_VERSION: "0.145.0"
         OPENCLAW_VERSION: "2026.7.1-2"
     image: hibro-node:local
-    container_name: hibro-node-local
+    container_name: "${HIBRO_NODE_CONTAINER_NAME:-hibro-node-local}"
     restart: unless-stopped
     ports:
       - "127.0.0.1:${HIBRO_DOCKER_PORT:-17332}:7331"
@@ -24,10 +24,9 @@ services:
       ANTHROPIC_MODEL: "${ANTHROPIC_MODEL:-}"
     volumes:
       - hibro-node-data:/data
-      - .:/workspace/project:ro
-      - "${HOME}/.codex/auth.json:/run/host-codex/auth.json:ro"
-      - "${HOME}/.codex/config.toml:/run/host-codex/config.toml:ro"
+      - "${HIBRO_NODE_PROJECT_ROOT:-.}:/workspace/project:ro"
+      - "${HIBRO_CODEX_DIR:-${HOME}/.codex}:/run/host-codex:ro"
 
 volumes:
   hibro-node-data:
-    name: hibro-node-data
+    name: "${HIBRO_NODE_DATA_VOLUME:-hibro-node-data}"

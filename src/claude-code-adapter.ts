@@ -11,6 +11,7 @@ import {
   type EngineExecutionResult,
 } from "./engine-adapter.ts";
 import { selectEngineEnvironment } from "./engine-environment.ts";
+import { PausableExecutionTimeout } from "./execution-timeout.ts";
 import { createId, createSecret } from "./identity.ts";
 
 export interface ClaudeAdapterOptions {
@@ -109,8 +110,13 @@ export class ClaudeCodeAdapter implements AgentEngineAdapter {
 
   async execute(input: ClaudeExecuteInput): Promise<ClaudeExecutionResult> {
     await access(input.workspace);
+    let pauseExecutionTimeout = (): void => {};
+    let resumeExecutionTimeout = (): void => {};
     const approvalHook = input.requestApproval
-      ? await this.startApprovalHook(input)
+      ? await this.startApprovalHook(input, {
+          pause: () => pauseExecutionTimeout(),
+          resume: () => resumeExecutionTimeout(),
+        })
       : undefined;
     const args = this.buildArgs(input, approvalHook?.settings);
     const child = spawn(this.executable, args, {
@@ -145,14 +151,13 @@ export class ClaudeCodeAdapter implements AgentEngineAdapter {
       terminate();
     }
 
-    const timeout =
-      timeoutMs && timeoutMs > 0
-        ? setTimeout(() => {
-            timedOut = true;
-            terminate();
-          }, timeoutMs)
-        : undefined;
-    timeout?.unref();
+    const executionTimeout = new PausableExecutionTimeout(timeoutMs, () => {
+      timedOut = true;
+      terminate();
+    });
+    pauseExecutionTimeout = () => executionTimeout.pause();
+    resumeExecutionTimeout = () => executionTimeout.resume();
+    executionTimeout.start();
 
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
@@ -187,7 +192,7 @@ export class ClaudeCodeAdapter implements AgentEngineAdapter {
       child.once("close", (code) => resolve(code ?? 1));
     }).finally(() => {
       input.signal?.removeEventListener("abort", abortListener);
-      if (timeout) clearTimeout(timeout);
+      executionTimeout.clear();
       if (forceKillTimer) clearTimeout(forceKillTimer);
       lines.close();
       void approvalHook?.close();
@@ -259,7 +264,10 @@ export class ClaudeCodeAdapter implements AgentEngineAdapter {
     return args;
   }
 
-  private async startApprovalHook(input: ClaudeExecuteInput): Promise<{
+  private async startApprovalHook(
+    input: ClaudeExecuteInput,
+    lifecycle: { pause: () => void; resume: () => void },
+  ): Promise<{
     server: Server;
     token: string;
     settings: string;
@@ -301,24 +309,30 @@ export class ClaudeCodeAdapter implements AgentEngineAdapter {
             : createId("apr");
         const command =
           typeof toolInput.command === "string" ? toolInput.command : undefined;
-        const decision = await input.requestApproval!({
-          externalId,
-          kind:
-            toolName === "Bash"
-              ? "command"
-              : ["Write", "Edit", "MultiEdit", "NotebookEdit"].includes(toolName)
-                ? "file_change"
-                : /Web|Fetch|Search/i.test(toolName)
-                  ? "network"
-                  : "tool",
-          title: `${toolName} 请求审批`,
-          detail: command ?? JSON.stringify(toolInput),
-          toolName,
-          command,
-          cwd:
-            typeof payload.cwd === "string" ? payload.cwd : input.workspace,
-          payload,
-        });
+        lifecycle.pause();
+        let decision;
+        try {
+          decision = await input.requestApproval!({
+            externalId,
+            kind:
+              toolName === "Bash"
+                ? "command"
+                : ["Write", "Edit", "MultiEdit", "NotebookEdit"].includes(toolName)
+                  ? "file_change"
+                  : /Web|Fetch|Search/i.test(toolName)
+                    ? "network"
+                    : "tool",
+            title: `${toolName} 请求审批`,
+            detail: command ?? JSON.stringify(toolInput),
+            toolName,
+            command,
+            cwd:
+              typeof payload.cwd === "string" ? payload.cwd : input.workspace,
+            payload,
+          });
+        } finally {
+          lifecycle.resume();
+        }
         response.writeHead(200, { "content-type": "application/json" });
         response.end(
           JSON.stringify({

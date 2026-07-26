@@ -10,6 +10,7 @@ import {
   type EngineExecutionResult,
 } from "./engine-adapter.ts";
 import { selectEngineEnvironment } from "./engine-environment.ts";
+import { PausableExecutionTimeout } from "./execution-timeout.ts";
 
 interface CommandResult {
   exitCode: number;
@@ -98,9 +99,6 @@ export class CodexAdapter implements AgentEngineAdapter {
     let parseFailure: Error | undefined;
     let timedOut = false;
     let forceKillTimer: NodeJS.Timeout | undefined;
-    let timeout: NodeJS.Timeout | undefined;
-    let timeoutStartedAt = 0;
-    let remainingTimeoutMs = input.options?.timeoutMs;
     let requestId = 0;
     let completed = false;
     const pending = new Map<
@@ -133,34 +131,11 @@ export class CodexAdapter implements AgentEngineAdapter {
     input.signal?.addEventListener("abort", abortListener, { once: true });
     if (input.signal?.aborted) terminate();
     const timeoutMs = input.options?.timeoutMs;
-    const resumeTimeout = (): void => {
-      if (
-        remainingTimeoutMs === undefined ||
-        timeout ||
-        timedOut ||
-        completed
-      ) {
-        return;
-      }
-      timeoutStartedAt = Date.now();
-      timeout = setTimeout(() => {
-        timeout = undefined;
-        remainingTimeoutMs = 0;
-        timedOut = true;
-        terminate();
-      }, Math.max(0, remainingTimeoutMs));
-      timeout.unref();
-    };
-    const pauseTimeout = (): void => {
-      if (!timeout || remainingTimeoutMs === undefined) return;
-      clearTimeout(timeout);
-      timeout = undefined;
-      remainingTimeoutMs = Math.max(
-        0,
-        remainingTimeoutMs - (Date.now() - timeoutStartedAt),
-      );
-    };
-    resumeTimeout();
+    const executionTimeout = new PausableExecutionTimeout(timeoutMs, () => {
+      timedOut = true;
+      terminate();
+    });
+    executionTimeout.start();
 
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
@@ -193,7 +168,7 @@ export class CodexAdapter implements AgentEngineAdapter {
       );
       const command =
         typeof params.command === "string" ? params.command : undefined;
-      pauseTimeout();
+      executionTimeout.pause();
       let decision;
       try {
         decision = await input.requestApproval({
@@ -221,7 +196,7 @@ export class CodexAdapter implements AgentEngineAdapter {
           payload: params,
         });
       } finally {
-        resumeTimeout();
+        if (!completed) executionTimeout.resume();
       }
       if (method === "item/permissions/requestApproval") {
         write({
@@ -405,7 +380,7 @@ export class CodexAdapter implements AgentEngineAdapter {
       terminate();
       await processExit.catch(() => 1);
       input.signal?.removeEventListener("abort", abortListener);
-      if (timeout) clearTimeout(timeout);
+      executionTimeout.clear();
       if (forceKillTimer) clearTimeout(forceKillTimer);
       lines.close();
       for (const waiter of pending.values()) {

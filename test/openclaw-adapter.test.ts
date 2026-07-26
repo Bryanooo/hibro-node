@@ -65,3 +65,28 @@ test("OpenClaw executes with Agent-private state, workspace and session", async 
   ]);
   assert.deepEqual(events, ["session.started", "assistant.message"]);
 });
+
+test("OpenClaw preflight approval happens before execution timeout starts", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hibro-openclaw-approval-"));
+  const workspace = join(root, "workspace");
+  const statePath = join(root, "state");
+  await Promise.all([mkdir(workspace), mkdir(statePath)]);
+  const result = await new OpenClawAdapter({
+    executable,
+    environment: { ANTHROPIC_API_KEY: "test-key" },
+  }).execute({
+    runId: "run-approval",
+    prompt: "approved",
+    workspace,
+    statePath,
+    options: {
+      sandbox: "danger-full-access",
+      timeoutMs: 500,
+    },
+    requestApproval: async () => {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 650));
+      return "allow_once";
+    },
+  });
+  assert.match(result.result, /approved/);
+});

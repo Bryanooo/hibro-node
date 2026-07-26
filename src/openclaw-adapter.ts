@@ -11,6 +11,7 @@ import {
 import { writeJsonAtomically } from "./storage.ts";
 import { selectEngineEnvironment } from "./engine-environment.ts";
 import { createId } from "./identity.ts";
+import { PausableExecutionTimeout } from "./execution-timeout.ts";
 
 interface CommandResult {
   exitCode: number;
@@ -165,14 +166,11 @@ export class OpenClawAdapter implements AgentEngineAdapter {
     input.signal?.addEventListener("abort", abortListener, { once: true });
     if (input.signal?.aborted) terminate();
     const timeoutMs = input.options?.timeoutMs;
-    const timeout =
-      timeoutMs && timeoutMs > 0
-        ? setTimeout(() => {
-            timedOut = true;
-            terminate();
-          }, timeoutMs)
-        : undefined;
-    timeout?.unref();
+    const executionTimeout = new PausableExecutionTimeout(timeoutMs, () => {
+      timedOut = true;
+      terminate();
+    });
+    executionTimeout.start();
 
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
@@ -187,7 +185,7 @@ export class OpenClawAdapter implements AgentEngineAdapter {
       child.once("close", (code) => resolvePromise(code ?? 1));
     }).finally(() => {
       input.signal?.removeEventListener("abort", abortListener);
-      if (timeout) clearTimeout(timeout);
+      executionTimeout.clear();
       if (forceKillTimer) clearTimeout(forceKillTimer);
     });
 

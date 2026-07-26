@@ -77,3 +77,16 @@ test("Claude PreToolUse hook pauses for a Hibro approval decision", async () => 
   assert.deepEqual(approvals, ["Bash:printf approved"]);
   assert.equal(result.result, "APPROVAL:allow");
 });
+
+test("Claude approval waiting does not consume execution timeout", async () => {
+  const result = await new ClaudeCodeAdapter({ executable }).execute({
+    prompt: "APPROVAL",
+    workspace: process.cwd(),
+    options: { timeoutMs: 500 },
+    requestApproval: async () => {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 650));
+      return "allow_once";
+    },
+  });
+  assert.equal(result.result, "APPROVAL:allow");
+});

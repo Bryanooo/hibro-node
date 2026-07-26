@@ -133,18 +133,18 @@ Node「系统配置」中填写 Core URL 和该注册码。Core 接受注册后�
 Node 可以不配置 Core 独立完成安装和运行。macOS、家庭设备以及希望隔离三种 Agent
 CLI 的场景推荐 Docker；Linux 服务器也可选择 Native systemd。
 
-从当前源码安装：
+已经取得源码时，只需在仓库目录执行：
 
 ```bash
-./scripts/setup.sh --mode docker
+sudo bash install.sh
 ```
 
-从公开 GitHub Release 匿名安装（不要求 GitHub 账号）：
+它会直接使用当前源码，不访问 GitHub；自动判断首次安装或升级，并在 Linux 没有
+Docker Compose 时选择 Native，否则选择 Docker。Node 不要求配置 Core，仍可独立运行。
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/Bryanooo/hibro-node/main/install.sh \
-  | bash -s -- install --mode docker
-```
+如果机器上只有单独下载的 `install.sh`，安装器才会从公开 GitHub Release 匿名下载
+并校验 latest 版本。高级场景可使用 `--source release`、`--mode docker|native` 或
+`--version vX.Y.Z`。
 
 脚本依次确认本机访问端口和 Agent 初始项目目录，随后创建权限为 `600` 的环境文件、
 构建镜像、启动服务并执行健康检查。它不会要求 Core 地址或注册码；需要接入 Core 时，
@@ -153,8 +153,8 @@ curl -fsSL https://raw.githubusercontent.com/Bryanooo/hibro-node/main/install.sh
 升级和查看状态：
 
 ```bash
-~/.local/share/hibro-node/source/current/install.sh update
-~/.local/share/hibro-node/source/current/install.sh status
+sudo bash /opt/hibro-node-source/current/install.sh
+sudo bash /opt/hibro-node-source/current/install.sh status
 ```
 
 稳定通道会校验 Release 的 SHA-256，升级失败会保留运行数据并恢复上一版本。开发联调

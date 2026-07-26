@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Hibro Node remote installer/upgrader.
-# Stable installations consume a public GitHub Release asset and SHA-256 file.
+# Hibro Node one-command installer/upgrader.
+# A source checkout is installed locally; an installed copy downloads a verified release.
 
+installer_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 repository="${HIBRO_INSTALL_REPOSITORY:-Bryanooo/hibro-node}"
 if [[ "${EUID}" -eq 0 ]]; then
   default_source_root="/opt/hibro-node-source"
@@ -17,6 +18,7 @@ source_root="${HIBRO_INSTALL_SOURCE_ROOT:-${default_source_root}}"
 state_dir="${HIBRO_INSTALL_STATE_DIR:-${default_state_dir}}"
 state_file="${state_dir}/hibro-node.env"
 channel="stable"
+source_mode="auto"
 requested_version=""
 mode=""
 force="false"
@@ -31,13 +33,20 @@ usage() {
 Hibro Node 一键安装与升级
 
 用法：
+  sudo bash install.sh
   sudo ./install.sh install [--mode docker|native] [--version vX.Y.Z] [部署选项]
   sudo ./install.sh update  [--version vX.Y.Z] [部署选项]
   sudo ./install.sh status
 
-不写 action 时：未安装执行 install，已安装执行 update。
+默认自动完成以下判断：
+  - 在完整源码目录中执行时，直接安装当前源码，不访问 GitHub
+  - 从已安装目录执行升级时，下载并校验 latest Release
+  - 已安装则升级，未安装则安装
+  - Linux 未检测到 Docker Compose 时使用 Native，否则使用 Docker
 
-下载选项：
+来源选项：
+  --source auto|local|release
+                           自动判断（默认）、当前源码或远程发布包
   --version TAG            安装指定 Release，默认 latest
   --channel stable|main    stable 使用带 SHA-256 的 Release
   --allow-unverified-main  允许 main 分支开发快照
@@ -50,7 +59,7 @@ Hibro Node 一键安装与升级
   --project-root PATH
   --service-user USER      仅 Native
 
-公开 GitHub Release 可通过匿名 HTTPS 下载，不要求 GitHub 账号或 Git。
+仅在使用远程发布包时才需要访问 GitHub；公开仓库不要求账号或 Git。
 EOF
 }
 
@@ -98,6 +107,11 @@ while (($# > 0)); do
       requested_version="$2"
       shift 2
       ;;
+    --source)
+      [[ $# -ge 2 ]] || fail "--source 缺少参数。"
+      source_mode="$2"
+      shift 2
+      ;;
     --channel)
       [[ $# -ge 2 ]] || fail "--channel 缺少参数。"
       channel="$2"
@@ -130,6 +144,9 @@ done
   fail "仓库名格式不合法。"
 [[ "${channel}" == "stable" || "${channel}" == "main" ]] ||
   fail "--channel 只支持 stable 或 main。"
+[[ "${source_mode}" == "auto" || "${source_mode}" == "local" ||
+   "${source_mode}" == "release" ]] ||
+  fail "--source 只支持 auto、local 或 release。"
 if [[ -n "${mode}" ]]; then
   [[ "${mode}" == "docker" || "${mode}" == "native" ]] ||
     fail "--mode 只支持 docker 或 native。"
@@ -144,12 +161,13 @@ if [[ -z "${action}" ]]; then
 fi
 if [[ "${action}" == "status" ]]; then
   if [[ ! -f "${state_file}" ]]; then
-    echo "Hibro Node 尚未通过远程安装器安装。"
+    echo "Hibro Node 尚未通过安装器安装。"
     exit 0
   fi
   echo "Hibro Node 安装状态"
   echo "  版本：$(read_state_value VERSION)"
   echo "  模式：$(read_state_value MODE)"
+  echo "  来源：$(read_state_value SOURCE)"
   echo "  源码：$(read_state_value RELEASE_DIR)"
   echo "  安装时间：$(read_state_value INSTALLED_AT)"
   exit 0
@@ -159,7 +177,7 @@ if [[ "${EUID}" -ne 0 &&
       ("${source_root}" == /opt/* || "${state_dir}" == /var/lib/*) ]]; then
   fail "默认安装目录需要管理员权限，请使用 sudo。"
 fi
-for command_name in curl tar awk grep mktemp; do
+for command_name in tar awk grep mktemp; do
   command -v "${command_name}" >/dev/null 2>&1 ||
     fail "缺少安装工具：${command_name}"
 done
@@ -172,11 +190,17 @@ if [[ "${action}" == "update" && ! -f "${state_file}" ]]; then
 fi
 if [[ -z "${mode}" ]]; then
   mode="$(read_state_value MODE)"
-  mode="${mode:-docker}"
-fi
-if [[ "${channel}" == "main" &&
-      "${allow_unverified_main}" != "true" ]]; then
-  fail "main 没有发布校验和；开发联调请显式添加 --allow-unverified-main。"
+  if [[ -z "${mode}" ]]; then
+    if command -v docker >/dev/null 2>&1 &&
+       docker compose version >/dev/null 2>&1; then
+      mode="docker"
+    elif [[ "$(uname -s)" == "Linux" ]]; then
+      mode="native"
+    else
+      mode="docker"
+    fi
+    echo "已自动选择 ${mode} 部署模式。"
+  fi
 fi
 
 mkdir -p -- "${source_root}/releases" "${state_dir}"
@@ -210,7 +234,56 @@ download() {
   esac
 }
 
-if [[ "${channel}" == "stable" ]]; then
+is_local_source="true"
+for local_required_path in \
+  VERSION package.json package-lock.json install.sh compose.yaml Dockerfile \
+  scripts/package-release.sh scripts/setup.sh scripts/setup-docker.sh \
+  scripts/setup-native.sh deploy/hibro-node.service.template; do
+  if [[ ! -f "${installer_dir}/${local_required_path}" ]]; then
+    is_local_source="false"
+    break
+  fi
+done
+if [[ "${is_local_source}" == "true" ]] &&
+   ! grep -Eq '"name"[[:space:]]*:[[:space:]]*"@hibro/node"' \
+     "${installer_dir}/package.json"; then
+  is_local_source="false"
+fi
+
+if [[ "${source_mode}" == "auto" && "${is_local_source}" == "true" ]]; then
+  installed_release="$(read_state_value RELEASE_DIR)"
+  if [[ -n "${installed_release}" && -d "${installed_release}" &&
+        "$(cd -- "${installed_release}" && pwd -P)" == "${installer_dir}" ]]; then
+    source_mode="release"
+  else
+    source_mode="local"
+  fi
+elif [[ "${source_mode}" == "auto" ]]; then
+  source_mode="release"
+fi
+if [[ "${source_mode}" == "local" && "${is_local_source}" != "true" ]]; then
+  fail "当前目录不是完整的 Hibro Node 源码，请改用 --source release。"
+fi
+
+if [[ "${source_mode}" == "local" ]]; then
+  command -v node >/dev/null 2>&1 ||
+    fail "安装当前源码需要 Node.js，请先安装 Node.js 24 或更高版本。"
+  echo "检测到完整源码，正在生成安全的本地安装包（不会包含 .git 或 .env）……"
+  local_release_dir="${temp_dir}/local-release"
+  bash "${installer_dir}/scripts/package-release.sh" "${local_release_dir}"
+  cp -- "${local_release_dir}/hibro-node.tar.gz" "${archive_path}"
+  cp -- "${local_release_dir}/hibro-node.tar.gz.sha256" "${checksum_path}"
+  effective_channel="local"
+else
+  command -v curl >/dev/null 2>&1 || fail "下载发布包需要 curl。"
+  effective_channel="${channel}"
+  if [[ "${channel}" == "main" &&
+        "${allow_unverified_main}" != "true" ]]; then
+    fail "main 没有发布校验和；开发联调请显式添加 --allow-unverified-main。"
+  fi
+fi
+
+if [[ "${source_mode}" == "release" && "${channel}" == "stable" ]]; then
   if [[ -n "${requested_version}" ]]; then
     tag="${requested_version}"
     [[ "${tag}" == v* ]] || tag="v${tag}"
@@ -222,6 +295,13 @@ if [[ "${channel}" == "stable" ]]; then
   echo "正在下载 Hibro Node ${tag} 发布包……"
   download "${asset_base%/}/hibro-node.tar.gz" "${archive_path}"
   download "${asset_base%/}/hibro-node.tar.gz.sha256" "${checksum_path}"
+elif [[ "${source_mode}" == "release" ]]; then
+  archive_url="${HIBRO_INSTALL_MAIN_ARCHIVE_URL:-https://codeload.github.com/${repository}/tar.gz/refs/heads/main}"
+  echo "警告：正在下载未签名的 main 分支快照。" >&2
+  download "${archive_url}" "${archive_path}"
+fi
+
+if [[ -f "${checksum_path}" ]]; then
   expected_checksum="$(awk 'NR == 1 { print $1 }' "${checksum_path}")"
   [[ "${expected_checksum}" =~ ^[A-Fa-f0-9]{64}$ ]] ||
     fail "发布包校验文件格式不正确。"
@@ -234,10 +314,6 @@ if [[ "${channel}" == "stable" ]]; then
   fi
   [[ "${actual_checksum}" == "${expected_checksum}" ]] ||
     fail "发布包 SHA-256 不匹配，已停止安装。"
-else
-  archive_url="${HIBRO_INSTALL_MAIN_ARCHIVE_URL:-https://codeload.github.com/${repository}/tar.gz/refs/heads/main}"
-  echo "警告：正在下载未签名的 main 分支快照。" >&2
-  download "${archive_url}" "${archive_path}"
 fi
 
 archive_entries="${temp_dir}/archive-entries.txt"
@@ -290,14 +366,15 @@ if [[ -n "${requested_version}" ]]; then
     fail "请求版本与发布包版本不一致。"
 fi
 current_version="$(read_state_value VERSION)"
-if [[ "${channel}" == "stable" && "${current_version}" == "${package_version}" &&
+if [[ "${source_mode}" == "release" && "${channel}" == "stable" &&
+      "${current_version}" == "${package_version}" &&
       "${force}" != "true" ]]; then
   echo "当前已经是 Hibro Node ${package_version}。"
   exit 0
 fi
 
 release_suffix="$(date -u +%Y%m%d%H%M%S)-$$"
-release_dir="${source_root}/releases/${package_version}-${channel}-${release_suffix}"
+release_dir="${source_root}/releases/${package_version}-${effective_channel}-${release_suffix}"
 mkdir -p -- "${release_dir}"
 cp -R "${candidate_dir}/." "${release_dir}/"
 chmod +x "${release_dir}/install.sh" "${release_dir}/scripts/"*.sh
@@ -373,6 +450,7 @@ state_temp="${state_file}.tmp.$$"
   {
     printf 'VERSION=%s\n' "${package_version}"
     printf 'MODE=%s\n' "${mode}"
+    printf 'SOURCE=%s\n' "${source_mode}"
     printf 'CHANNEL=%s\n' "${channel}"
     printf 'REPOSITORY=%s\n' "${repository}"
     printf 'RELEASE_DIR=%s\n' "${release_dir}"
@@ -384,4 +462,4 @@ mv -f "${state_temp}" "${state_file}"
 
 echo
 echo "Hibro Node ${package_version} 已安装完成。"
-echo "以后升级：${source_root}/current/install.sh update"
+echo "以后升级：sudo bash ${source_root}/current/install.sh"

@@ -41,6 +41,20 @@ function makeRelease(
   );
   writeFileSync(join(source, "install.sh"), "#!/usr/bin/env bash\n");
   chmodSync(join(source, "install.sh"), 0o755);
+  writeFileSync(
+    join(source, "scripts", "package-release.sh"),
+    [
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      'repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"',
+      'output_dir="$1"',
+      'mkdir -p -- "${output_dir}"',
+      'tar -czf "${output_dir}/hibro-node.tar.gz" -C "${repo_dir}" VERSION package.json package-lock.json install.sh compose.yaml Dockerfile deploy scripts',
+      'if command -v sha256sum >/dev/null 2>&1; then checksum="$(sha256sum "${output_dir}/hibro-node.tar.gz" | awk \'{print $1}\')"; else checksum="$(shasum -a 256 "${output_dir}/hibro-node.tar.gz" | awk \'{print $1}\')"; fi',
+      'printf "%s  hibro-node.tar.gz\\n" "${checksum}" >"${output_dir}/hibro-node.tar.gz.sha256"',
+      "",
+    ].join("\n"),
+  );
   for (const name of ["setup-docker.sh", "setup-native.sh"]) {
     writeFileSync(join(source, "scripts", name), "#!/usr/bin/env bash\n");
   }
@@ -60,7 +74,12 @@ function makeRelease(
       "",
     ].join("\n"),
   );
-  for (const name of ["setup.sh", "setup-docker.sh", "setup-native.sh"]) {
+  for (const name of [
+    "package-release.sh",
+    "setup.sh",
+    "setup-docker.sh",
+    "setup-native.sh",
+  ]) {
     chmodSync(join(source, "scripts", name), 0o755);
   }
 
@@ -79,13 +98,41 @@ function makeRelease(
   return join(root, "assets");
 }
 
+test("Node one-command install uses a complete local checkout without GitHub", () => {
+  const root = mkdtempSync(join(tmpdir(), "hibro-node-local-"));
+  makeRelease(root, "4.0.0");
+  const source = join(root, "source-4.0.0");
+  writeFileSync(join(source, "install.sh"), readFileSync(installerPath));
+  chmodSync(join(source, "install.sh"), 0o755);
+
+  const result = spawnSync("bash", [join(source, "install.sh"), "--mode", "docker"], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      HIBRO_INSTALL_SOURCE_ROOT: join(root, "installed-source"),
+      HIBRO_INSTALL_STATE_DIR: join(root, "installer-state"),
+      HIBRO_INSTALL_LATEST_ASSET_BASE_URL: "https://127.0.0.1:1/unreachable",
+      HIBRO_INSTALL_DOCKER_ENV_FILE: join(root, "runtime.env"),
+      HIBRO_TEST_SETUP_LOG: join(root, "setup.log"),
+    },
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /检测到完整源码/);
+  assert.match(result.stdout, /4\.0\.0 已安装完成/);
+  assert.match(
+    readFileSync(join(root, "installer-state", "hibro-node.env"), "utf8"),
+    /SOURCE=local/,
+  );
+});
+
 function runInstaller(
   root: string,
   assetDirectory: string,
   args: string[],
   extraEnv: Record<string, string> = {},
 ) {
-  return spawnSync("bash", [installerPath, ...args], {
+  return spawnSync("bash", [installerPath, "--source", "release", ...args], {
     encoding: "utf8",
     env: {
       ...process.env,

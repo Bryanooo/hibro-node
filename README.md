@@ -106,15 +106,11 @@ npm start
 默认监听 `http://127.0.0.1:7331`。打开
 `http://127.0.0.1:7331/console` 可以使用完整的本地管理台：
 
-控制台和所有管理 API 使用独立的 Node 控制凭据。浏览器访问控制台时进入 Hibro
-自己的登录页，成功后创建一个 `HttpOnly`、`SameSite=Strict`、有效期 12 小时的会话，
-不会触发浏览器或 macOS 的原生认证窗口。脚本访问 API 仍可使用用户名 `hibro` 的
-HTTP Basic 凭据，但服务器不会发送会触发登录弹窗的 `WWW-Authenticate` 响应头。
-
-控制口令优先从 `HIBRO_NODE_CONTROL_TOKEN` 读取。未配置时，Node 会首次生成强随机
-凭据，保存到数据目录的 `control-token`（权限 `0600`）。启动日志永远不会输出口令；
-需要查看时运行 `npm run control-token`。Docker 部署可运行
-`docker compose exec hibro-node npm run control-token`。
+Node 是本机 Agent Runtime，不维护用户账号、注册或登录体系。控制台和本地 API 可以
+直接访问；Docker 默认只将端口发布到宿主机的 `127.0.0.1`，Native 默认也仅监听本机。
+如果需要让 Node 归属某个 Core 用户，请先登录 Core 生成一次性 Node 注册码，再到
+Node「系统配置」中填写 Core URL 和该注册码。Core 接受注册后会换发独立 Node 凭据，
+后续自动连接不需要再次输入。
 
 - 总览：Agent、活动运行、成功率、引擎状态和快速操作
 - Agents：搜索、新建、编辑、启停、删除和直接运行

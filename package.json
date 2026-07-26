@@ -11,7 +11,6 @@
     "start": "node --experimental-strip-types src/cli.ts serve",
     "dev": "node --experimental-strip-types --watch src/cli.ts serve",
     "doctor": "node --experimental-strip-types src/cli.ts doctor",
-    "control-token": "node --experimental-strip-types src/cli.ts control-token",
     "run": "node --experimental-strip-types src/cli.ts run",
     "test": "node --experimental-strip-types --test test/*.test.ts",
     "check": "node --experimental-strip-types scripts/check.ts",

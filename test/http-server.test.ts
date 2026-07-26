@@ -11,20 +11,7 @@ import { FileRunStore } from "../src/storage.ts";
 import { WorkspaceManager } from "../src/workspace-manager.ts";
 
 const executable = resolve("test/fixtures/fake-claude.mjs");
-const CONTROL_TOKEN = "hibro-node-test-control-token";
 await chmod(executable, 0o755);
-
-function authenticatedFetch(
-  input: string | URL | Request,
-  init: RequestInit = {},
-): Promise<Response> {
-  const headers = new Headers(init.headers);
-  headers.set(
-    "authorization",
-    `Basic ${Buffer.from(`hibro:${CONTROL_TOKEN}`).toString("base64")}`,
-  );
-  return fetch(input, { ...init, headers });
-}
 
 test("HTTP API creates and returns a run", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "hibro-node-http-test-"));
@@ -37,7 +24,6 @@ test("HTTP API creates and returns a run", async (context) => {
     host: "127.0.0.1",
     port: 0,
     manager,
-    controlToken: CONTROL_TOKEN,
   });
   context.after(() => server.close());
   const address = await listen(server, "127.0.0.1", 0);
@@ -54,110 +40,39 @@ test("HTTP API creates and returns a run", async (context) => {
   assert.ok(healthBody.hostname);
   assert.equal(healthBody.cwd, process.cwd());
 
-  const anonymousSettings = await fetch(`${base}/v1/settings`);
-  assert.equal(anonymousSettings.status, 401);
-  assert.equal(anonymousSettings.headers.get("www-authenticate"), null);
+  const settingsWithoutLogin = await fetch(`${base}/v1/settings`);
+  assert.equal(settingsWithoutLogin.status, 200);
+  const removedLoginPage = await fetch(`${base}/login`);
+  assert.equal(removedLoginPage.status, 404);
 
-  const anonymousConsole = await fetch(`${base}/console`, {
-    redirect: "manual",
-  });
-  assert.equal(anonymousConsole.status, 302);
-  assert.equal(anonymousConsole.headers.get("location"), "/login?next=%2Fconsole");
-
-  const loginPage = await fetch(`${base}/login?next=%2Fconsole`);
-  assert.equal(loginPage.status, 200);
-  assert.match(await loginPage.text(), /登录本地 Node/);
-
-  const invalidLogin = await fetch(`${base}/login`, {
-    method: "POST",
-    redirect: "manual",
-    headers: {
-      "content-type": "application/x-www-form-urlencoded",
-      origin: base,
-    },
-    body: new URLSearchParams({ token: "wrong", next: "/console" }),
-  });
-  assert.equal(invalidLogin.status, 401);
-  assert.equal(invalidLogin.headers.get("www-authenticate"), null);
-  assert.match(await invalidLogin.text(), /控制口令不正确/);
-
-  const validLogin = await fetch(`${base}/login`, {
-    method: "POST",
-    redirect: "manual",
-    headers: {
-      "content-type": "application/x-www-form-urlencoded",
-      origin: base,
-    },
-    body: new URLSearchParams({ token: CONTROL_TOKEN, next: "/console" }),
-  });
-  assert.equal(validLogin.status, 303);
-  assert.equal(validLogin.headers.get("location"), "/console");
-  const sessionCookie = validLogin.headers.get("set-cookie")?.split(";", 1)[0];
-  assert.match(sessionCookie ?? "", /^hibro_node_session=/);
-  assert.match(validLogin.headers.get("set-cookie") ?? "", /HttpOnly/);
-  assert.match(validLogin.headers.get("set-cookie") ?? "", /SameSite=Strict/);
-  const sessionConsole = await fetch(`${base}/console`, {
-    headers: { cookie: sessionCookie ?? "" },
-  });
-  assert.equal(sessionConsole.status, 200);
-  assert.match(await sessionConsole.text(), /Hibro Node Console/);
-  assert.match(await (await authenticatedFetch(`${base}/console`)).text(), /退出 Node 控制台/);
-
-  const logout = await fetch(`${base}/logout`, {
-    method: "POST",
-    redirect: "manual",
-    headers: { cookie: sessionCookie ?? "", origin: base },
-  });
-  assert.equal(logout.status, 303);
-  assert.equal(logout.headers.get("location"), "/login");
-  assert.match(logout.headers.get("set-cookie") ?? "", /Max-Age=0/);
-
-  const crossOriginLogin = await fetch(`${base}/login`, {
-    method: "POST",
-    redirect: "manual",
-    headers: {
-      "content-type": "application/x-www-form-urlencoded",
-      origin: "https://attacker.example",
-    },
-    body: new URLSearchParams({ token: CONTROL_TOKEN, next: "/console" }),
-  });
-  assert.equal(crossOriginLogin.status, 403);
-
-  assert.equal(
-    (await fetch(`${base}/console/styles.css`)).headers.get(
-      "www-authenticate",
-    ),
-    null,
-  );
-
-  const consolePage = await authenticatedFetch(`${base}/console`);
+  const consolePage = await fetch(`${base}/console`);
   assert.equal(consolePage.status, 200);
   assert.match(consolePage.headers.get("content-security-policy") ?? "", /default-src 'self'/);
   assert.match(await consolePage.text(), /Hibro Node Console/);
-  const consoleHtml = await (await authenticatedFetch(`${base}/console`)).text();
+  const consoleHtml = await (await fetch(`${base}/console`)).text();
   assert.match(consoleHtml, /data-close-dialog="run-dialog"/);
   assert.match(consoleHtml, /id="new-agent-button"/);
   assert.match(consoleHtml, /id="settings-form"/);
   assert.match(consoleHtml, /初始项目目录/);
   assert.match(consoleHtml, /Agent 专属空间/);
 
-  const consoleCss = await authenticatedFetch(`${base}/console/styles.css`);
+  const consoleCss = await fetch(`${base}/console/styles.css`);
   assert.equal(consoleCss.status, 200);
   assert.match(consoleCss.headers.get("content-type") ?? "", /text\/css/);
 
-  const consoleJs = await authenticatedFetch(`${base}/console/app.js`);
+  const consoleJs = await fetch(`${base}/console/app.js`);
   assert.equal(consoleJs.status, 200);
   const consoleScript = await consoleJs.text();
   assert.match(consoleScript, /events\?format=json/);
   assert.match(consoleScript, /初始项目（只用于创建工作副本）/);
   assert.match(consoleScript, /Agent 专属空间（实际工作位置）/);
 
-  const brand = await authenticatedFetch(`${base}/console/hibro-mark.png`);
+  const brand = await fetch(`${base}/console/hibro-mark.png`);
   assert.equal(brand.status, 200);
   assert.equal(brand.headers.get("content-type"), "image/png");
   assert.ok((await brand.arrayBuffer()).byteLength > 1_000);
 
-  const response = await authenticatedFetch(`${base}/v1/runs`, {
+  const response = await fetch(`${base}/v1/runs`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ prompt: "api", workspace: process.cwd() }),
@@ -167,18 +82,18 @@ test("HTTP API creates and returns a run", async (context) => {
   const terminal = await manager.waitForTerminal(created.id);
   assert.equal(terminal.status, "completed");
 
-  const artifactsResponse = await authenticatedFetch(`${base}/v1/artifacts`);
+  const artifactsResponse = await fetch(`${base}/v1/artifacts`);
   const artifacts = (await artifactsResponse.json()) as {
     artifacts: Array<{ runId: string; content: string }>;
   };
   assert.equal(artifacts.artifacts[0]?.runId, created.id);
   assert.equal(artifacts.artifacts[0]?.content, "ACK:api");
 
-  const artifactDownload = await authenticatedFetch(`${base}/v1/artifacts/${created.id}/download`);
+  const artifactDownload = await fetch(`${base}/v1/artifacts/${created.id}/download`);
   assert.equal(artifactDownload.status, 200);
   assert.match(await artifactDownload.text(), /ACK:api/);
 
-  const settingsResponse = await authenticatedFetch(`${base}/v1/settings`, {
+  const settingsResponse = await fetch(`${base}/v1/settings`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ nodeName: "HTTP Test Node", maxConcurrentRuns: 3 }),
@@ -191,13 +106,13 @@ test("HTTP API creates and returns a run", async (context) => {
   assert.equal(settings.nodeName, "HTTP Test Node");
   assert.equal(settings.maxConcurrentRuns, 3);
 
-  const systemResponse = await authenticatedFetch(`${base}/v1/system`);
+  const systemResponse = await fetch(`${base}/v1/system`);
   assert.equal(systemResponse.status, 200);
   const system = (await systemResponse.json()) as { nodeVersion: string; dataDir: string };
   assert.match(system.nodeVersion, /^v/);
   assert.equal(system.dataDir, root);
 
-  const protocolResponse = await authenticatedFetch(`${base}/v1/protocol`);
+  const protocolResponse = await fetch(`${base}/v1/protocol`);
   assert.equal(protocolResponse.status, 200);
   const protocol = (await protocolResponse.json()) as {
     protocol: string;
@@ -210,11 +125,11 @@ test("HTTP API creates and returns a run", async (context) => {
   assert.ok(protocol.messageTypes.includes("agent.registration"));
   assert.equal(protocol.runtimeTransportImplemented, true);
 
-  const fetched = await authenticatedFetch(`${base}/v1/runs/${created.id}`);
+  const fetched = await fetch(`${base}/v1/runs/${created.id}`);
   const run = (await fetched.json()) as { result: string };
   assert.equal(run.result, "ACK:api");
 
-  const eventResponse = await authenticatedFetch(`${base}/v1/runs/${created.id}/events`);
+  const eventResponse = await fetch(`${base}/v1/runs/${created.id}/events`);
   assert.equal(eventResponse.status, 200);
   assert.match(eventResponse.headers.get("content-type") ?? "", /text\/event-stream/);
   const eventBody = await eventResponse.text();
@@ -247,13 +162,12 @@ test("Agent API generates IDs, exposes private paths and reports Core registrati
     host: "127.0.0.1",
     port: 0,
     manager,
-    controlToken: CONTROL_TOKEN,
   });
   context.after(() => server.close());
   const address = await listen(server, "127.0.0.1", 0);
   const base = `http://127.0.0.1:${address.port}`;
 
-  const createdResponse = await authenticatedFetch(`${base}/v1/agents`, {
+  const createdResponse = await fetch(`${base}/v1/agents`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -270,7 +184,7 @@ test("Agent API generates IDs, exposes private paths and reports Core registrati
   assert.match(created.id, /^agt_[0-9a-hjkmnp-tv-z]{26}$/);
   assert.notEqual(created.id, "client-supplied-id-is-ignored");
 
-  const elevatedRun = await authenticatedFetch(`${base}/v1/runs`, {
+  const elevatedRun = await fetch(`${base}/v1/runs`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -288,7 +202,7 @@ test("Agent API generates IDs, exposes private paths and reports Core registrati
     /exceeds Agent policy/,
   );
 
-  const crossOriginMutation = await authenticatedFetch(`${base}/v1/agents`, {
+  const crossOriginMutation = await fetch(`${base}/v1/agents`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -298,7 +212,7 @@ test("Agent API generates IDs, exposes private paths and reports Core registrati
   });
   assert.equal(crossOriginMutation.status, 403);
 
-  const agentsResponse = await authenticatedFetch(`${base}/v1/agents`);
+  const agentsResponse = await fetch(`${base}/v1/agents`);
   const standalone = (await agentsResponse.json()) as {
     agents: Array<{
       agent: { id: string; source: { path: string } };
@@ -315,7 +229,7 @@ test("Agent API generates IDs, exposes private paths and reports Core registrati
   assert.ok(defaults.length >= 2);
   assert.equal(new Set(defaults.map((value) => value.paths.workspace)).size, defaults.length);
 
-  const workspaceBody = (await (await authenticatedFetch(`${base}/v1/workspaces`)).json()) as {
+  const workspaceBody = (await (await fetch(`${base}/v1/workspaces`)).json()) as {
     workspaces: Array<{ agentId: string; path: string; sourcePath: string }>;
   };
   assert.equal(
@@ -324,7 +238,7 @@ test("Agent API generates IDs, exposes private paths and reports Core registrati
   );
   assert.ok(workspaceBody.workspaces.every((value) => value.sourcePath === source));
 
-  const settingsResponse = await authenticatedFetch(`${base}/v1/settings`, {
+  const settingsResponse = await fetch(`${base}/v1/settings`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -334,7 +248,7 @@ test("Agent API generates IDs, exposes private paths and reports Core registrati
     }),
   });
   assert.equal(settingsResponse.status, 200);
-  const pending = (await (await authenticatedFetch(`${base}/v1/agents`)).json()) as {
+  const pending = (await (await fetch(`${base}/v1/agents`)).json()) as {
     agents: Array<{ coreRegistration: { status: string; error?: string } }>;
   };
   assert.ok(pending.agents.every((value) => value.coreRegistration.status === "pending"));

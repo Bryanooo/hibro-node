@@ -15,7 +15,6 @@ import { join } from "node:path";
 import { CoreTransport } from "./core-transport.ts";
 import { ConversationStore } from "./conversation-store.ts";
 import { ConversationService } from "./conversation-service.ts";
-import { loadNodeControlCredential } from "./node-access.ts";
 
 type Flags = Record<string, string | boolean>;
 
@@ -105,7 +104,6 @@ function printUsage(): void {
 Usage:
   npm run doctor -- [--claude-bin PATH] [--codex-bin PATH] [--openclaw-bin PATH]
   npm run run -- --prompt TEXT [--agent ID] [--session-id UUID]
-  npm run control-token
   npm start -- [--host 127.0.0.1] [--port 7331]
 
 Environment:
@@ -115,7 +113,6 @@ Environment:
   HIBRO_NODE_DATA_DIR    Persistent run data directory
   HIBRO_NODE_HOST        HTTP bind host
   HIBRO_NODE_PORT        HTTP bind port
-  HIBRO_NODE_CONTROL_TOKEN  Node console/API password (username: hibro)
   HIBRO_IMPORT_SHELL_ENV Import Claude variables from interactive shell (default: true)
 `);
 }
@@ -176,18 +173,6 @@ async function runOnce(flags: Flags): Promise<void> {
   }
 }
 
-async function showControlToken(flags: Flags): Promise<void> {
-  const config = configFromFlags(flags);
-  const credential = await loadNodeControlCredential(config.dataDir);
-  process.stdout.write(
-    `${JSON.stringify({
-      username: "hibro",
-      token: credential.token,
-      tokenPath: credential.path,
-    })}\n`,
-  );
-}
-
 async function serve(flags: Flags): Promise<void> {
   const config = configFromFlags(flags);
   const runtime = await buildManager(config);
@@ -200,7 +185,6 @@ async function serve(flags: Flags): Promise<void> {
     manager,
   );
   await conversations.init();
-  const controlCredential = await loadNodeControlCredential(config.dataDir);
   const coreTransport = new CoreTransport(manager, conversations);
   coreTransport.start();
   const server = createHibroHttpServer({
@@ -208,7 +192,6 @@ async function serve(flags: Flags): Promise<void> {
     port: config.port,
     manager,
     conversations,
-    controlToken: controlCredential.token,
   });
   const address = await listen(server, config.host, config.port);
   process.stdout.write(
@@ -219,12 +202,6 @@ async function serve(flags: Flags): Promise<void> {
       claudeExecutable: config.claudeExecutable,
       importedShellKeys: runtime.importedShellKeys,
       shellWarning: runtime.shellWarning,
-      controlAuthentication: {
-        username: "hibro",
-        generated: controlCredential.generated,
-        tokenPath: controlCredential.path,
-        hint: "Run `npm run control-token` locally or the equivalent command inside the container.",
-      },
     })}\n`,
   );
 
@@ -243,7 +220,6 @@ async function main(): Promise<void> {
   const flags = parseFlags(args);
   if (command === "doctor") return doctor(flags);
   if (command === "run") return runOnce(flags);
-  if (command === "control-token") return showControlToken(flags);
   if (command === "serve") return serve(flags);
   printUsage();
 }

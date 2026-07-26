@@ -47,7 +47,6 @@ export const CONSOLE_HTML = `<!doctype html>
           <div class="top-actions">
             <span class="last-refresh" id="last-refresh">尚未刷新</span>
             <button type="button" class="icon-button" id="refresh-button" aria-label="刷新全部数据" title="刷新">↻</button>
-            <form method="post" action="/logout"><button type="submit" class="icon-button" aria-label="退出 Node 控制台" title="退出">⇥</button></form>
             <button type="button" class="primary-button" id="global-new-run">＋ 发起运行</button>
           </div>
         </header>
@@ -208,7 +207,7 @@ export const CONSOLE_HTML = `<!doctype html>
                 <div class="subsection">
                   <div class="subsection-head"><div><b>Hibro Core</b><small>启用后自动注册 Node、同步 Agent，并接收远程运行</small></div><label class="switch"><input id="setting-core-enabled" type="checkbox" /><i></i></label></div>
                   <label><span>Core URL</span><input id="setting-core-url" type="url" placeholder="ws://host.docker.internal:17400" /></label>
-                  <label><span>Node 凭据</span><input id="setting-core-token" type="password" autocomplete="off" placeholder="粘贴一次性注册码或新凭据" /><small id="core-token-status">尚未配置。首次连接时可粘贴 Core 生成的一次性注册码。</small></label>
+                  <label><span>Core 一次性注册码</span><input id="setting-core-token" type="password" autocomplete="off" placeholder="粘贴 Core 生成的一次性注册码" /><small id="core-token-status">尚未注册。请先在 Core 中生成一次性注册码。</small></label>
                   <p class="field-hint" id="core-connection-hint">Core 未启用。</p>
                 </div>
               </div>
@@ -761,10 +760,6 @@ function notify(message, kind) {
 
 async function json(url, options) {
   const response = await fetch(url, options);
-  if (response.status === 401) {
-    window.location.assign("/login?next=%2Fconsole");
-    throw new Error("登录已过期，正在重新登录");
-  }
   const contentType = response.headers.get("content-type") || "";
   const body = contentType.includes("application/json") ? await response.json() : await response.text();
   if (!response.ok) {
@@ -1404,8 +1399,8 @@ function renderSystem() {
     byId("setting-core-url").value = state.settings.coreUrl || "";
     byId("setting-core-token").value = state.settings.coreToken || "";
     byId("core-token-status").textContent = state.settings.coreTokenConfigured
-      ? "已安全保存独立 Node 凭据；留空保存不会覆盖现有凭据。"
-      : "尚未配置。首次连接时可粘贴 Core 生成的一次性注册码。";
+      ? "已完成 Core 注册，Node 专用凭据已自动保存；无需再次输入。"
+      : "尚未注册。请先在 Core 中生成一次性注册码。";
     byId("settings-save-state").textContent = "已同步";
     byId("settings-save-state").className = "save-state";
   }

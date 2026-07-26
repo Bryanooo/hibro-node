@@ -33,6 +33,17 @@ export interface CoreOutboxRecord {
   nextAttemptAt?: string | undefined;
 }
 
+export interface ArtifactSyncRecord {
+  artifactId: string;
+  runId: string;
+  sha256?: string | undefined;
+  targetCore?: string | undefined;
+  status: "local_only" | "pending" | "uploading" | "synced" | "failed";
+  messageId?: string | undefined;
+  error?: string | undefined;
+  updatedAt: string;
+}
+
 export interface RunStore {
   readonly rootDir: string;
   readonly databasePath?: string | undefined;
@@ -48,6 +59,9 @@ export interface RunStore {
   pendingCoreMessages(now?: Date, limit?: number): CoreOutboxRecord[];
   markCoreMessageAttempt(messageId: string, nextAttemptAt: Date): void;
   acknowledgeCoreMessage(messageId: string, acknowledgedAt?: Date): void;
+  getArtifactSync(artifactId: string): ArtifactSyncRecord | undefined;
+  findArtifactSyncByMessage(messageId: string): ArtifactSyncRecord | undefined;
+  upsertArtifactSync(record: ArtifactSyncRecord): void;
   hasProcessedCoreCommand(messageId: string): boolean;
   rememberProcessedCoreCommand(messageId: string, processedAt?: Date): void;
   pruneProtocolHistory(cutoff: Date): void;
@@ -57,6 +71,7 @@ export class FileRunStore implements RunStore {
   readonly rootDir: string;
   private readonly coreOutbox = new Map<string, CoreOutboxRecord>();
   private readonly processedCoreCommands = new Map<string, string>();
+  private readonly artifactSync = new Map<string, ArtifactSyncRecord>();
 
   constructor(rootDir: string) {
     this.rootDir = rootDir;
@@ -139,6 +154,9 @@ export class FileRunStore implements RunStore {
       }
       assertSafeRunId(run.id);
       await rm(this.runDir(run.id), { recursive: true, force: true });
+      for (const [artifactId, sync] of this.artifactSync) {
+        if (sync.runId === run.id) this.artifactSync.delete(artifactId);
+      }
       removed.push(run.id);
     }
     return removed;
@@ -171,6 +189,22 @@ export class FileRunStore implements RunStore {
 
   acknowledgeCoreMessage(messageId: string): void {
     this.coreOutbox.delete(messageId);
+  }
+
+  getArtifactSync(artifactId: string): ArtifactSyncRecord | undefined {
+    const record = this.artifactSync.get(artifactId);
+    return record ? { ...record } : undefined;
+  }
+
+  findArtifactSyncByMessage(messageId: string): ArtifactSyncRecord | undefined {
+    const record = [...this.artifactSync.values()].find(
+      (candidate) => candidate.messageId === messageId,
+    );
+    return record ? { ...record } : undefined;
+  }
+
+  upsertArtifactSync(record: ArtifactSyncRecord): void {
+    this.artifactSync.set(record.artifactId, { ...record });
   }
 
   hasProcessedCoreCommand(messageId: string): boolean {
@@ -221,6 +255,30 @@ interface OutboxRow {
   payload_json: string;
   attempt_count: number;
   next_attempt_at: string | null;
+}
+
+interface ArtifactSyncRow {
+  artifact_id: string;
+  run_id: string;
+  sha256: string | null;
+  target_core: string | null;
+  status: ArtifactSyncRecord["status"];
+  message_id: string | null;
+  error: string | null;
+  updated_at: string;
+}
+
+function artifactSyncFromRow(row: ArtifactSyncRow): ArtifactSyncRecord {
+  return {
+    artifactId: row.artifact_id,
+    runId: row.run_id,
+    sha256: row.sha256 ?? undefined,
+    targetCore: row.target_core ?? undefined,
+    status: row.status,
+    messageId: row.message_id ?? undefined,
+    error: row.error ?? undefined,
+    updatedAt: row.updated_at,
+  };
 }
 
 export class SqliteRunStore implements RunStore {
@@ -285,7 +343,22 @@ export class SqliteRunStore implements RunStore {
       );
       CREATE INDEX IF NOT EXISTS core_command_inbox_processed_idx
         ON core_command_inbox(processed_at);
-      PRAGMA user_version = 2;
+      CREATE TABLE IF NOT EXISTS artifact_sync (
+        artifact_id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        sha256 TEXT,
+        target_core TEXT,
+        status TEXT NOT NULL,
+        message_id TEXT,
+        error TEXT,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS artifact_sync_message_idx
+        ON artifact_sync(message_id);
+      CREATE INDEX IF NOT EXISTS artifact_sync_status_idx
+        ON artifact_sync(status, updated_at);
+      PRAGMA user_version = 3;
     `);
     this.database = database;
     await chmod(this.databasePath, 0o600);
@@ -434,6 +507,48 @@ export class SqliteRunStore implements RunStore {
         WHERE message_id = ?
       `)
       .run(acknowledgedAt.toISOString(), messageId);
+  }
+
+  getArtifactSync(artifactId: string): ArtifactSyncRecord | undefined {
+    const row = this.connection()
+      .prepare("SELECT * FROM artifact_sync WHERE artifact_id = ?")
+      .get(artifactId) as ArtifactSyncRow | undefined;
+    return row ? artifactSyncFromRow(row) : undefined;
+  }
+
+  findArtifactSyncByMessage(messageId: string): ArtifactSyncRecord | undefined {
+    const row = this.connection()
+      .prepare("SELECT * FROM artifact_sync WHERE message_id = ?")
+      .get(messageId) as ArtifactSyncRow | undefined;
+    return row ? artifactSyncFromRow(row) : undefined;
+  }
+
+  upsertArtifactSync(record: ArtifactSyncRecord): void {
+    this.connection()
+      .prepare(`
+        INSERT INTO artifact_sync(
+          artifact_id, run_id, sha256, target_core, status,
+          message_id, error, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(artifact_id) DO UPDATE SET
+          run_id = excluded.run_id,
+          sha256 = excluded.sha256,
+          target_core = excluded.target_core,
+          status = excluded.status,
+          message_id = excluded.message_id,
+          error = excluded.error,
+          updated_at = excluded.updated_at
+      `)
+      .run(
+        record.artifactId,
+        record.runId,
+        record.sha256 ?? null,
+        record.targetCore ?? null,
+        record.status,
+        record.messageId ?? null,
+        record.error ?? null,
+        record.updatedAt,
+      );
   }
 
   hasProcessedCoreCommand(messageId: string): boolean {

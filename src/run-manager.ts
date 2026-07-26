@@ -26,7 +26,7 @@ import {
   type EngineApprovalRequest,
 } from "./engine-adapter.ts";
 import { FileAgentRegistry } from "./agent-registry.ts";
-import type { RunStore } from "./storage.ts";
+import type { ArtifactSyncRecord, RunStore } from "./storage.ts";
 import { WorkspaceManager } from "./workspace-manager.ts";
 import { FileSettingsStore } from "./settings-store.ts";
 
@@ -209,13 +209,65 @@ export class RunManager {
         );
       }
     }
-    return artifacts.sort((left, right) =>
-      right.createdAt.localeCompare(left.createdAt),
-    );
+    return artifacts
+      .map((artifact) => ({
+        ...artifact,
+        sync: this.artifactSyncState(artifact),
+      }))
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   }
 
   async getArtifact(artifactId: string): Promise<ArtifactRecord | undefined> {
     return (await this.listArtifacts()).find((artifact) => artifact.id === artifactId);
+  }
+
+  getArtifactSyncRecord(artifactId: string): ArtifactSyncRecord | undefined {
+    return this.store.getArtifactSync(artifactId);
+  }
+
+  setArtifactSync(
+    artifact: ArtifactRecord,
+    status: ArtifactSyncRecord["status"],
+    options: {
+      messageId?: string | undefined;
+      error?: string | undefined;
+    } = {},
+  ): ArtifactSyncRecord {
+    const record: ArtifactSyncRecord = {
+      artifactId: artifact.id,
+      runId: artifact.runId,
+      sha256: artifact.sha256,
+      targetCore: this.settings.get().coreUrl,
+      status,
+      messageId: options.messageId,
+      error: options.error,
+      updatedAt: new Date().toISOString(),
+    };
+    this.store.upsertArtifactSync(record);
+    return record;
+  }
+
+  private artifactSyncState(
+    artifact: ArtifactRecord,
+  ): NonNullable<ArtifactRecord["sync"]> {
+    const settings = this.settings.get();
+    const record = this.store.getArtifactSync(artifact.id);
+    const appliesToCurrentArtifact =
+      record &&
+      record.sha256 === artifact.sha256 &&
+      record.targetCore === settings.coreUrl;
+    const status = appliesToCurrentArtifact
+      ? record.status
+      : settings.coreEnabled
+        ? "pending"
+        : "local_only";
+    return {
+      status,
+      synced: status === "synced",
+      target: "hibro-core",
+      updatedAt: appliesToCurrentArtifact ? record.updatedAt : undefined,
+      error: appliesToCurrentArtifact ? record.error : undefined,
+    };
   }
 
   private async scanArtifactDirectory(

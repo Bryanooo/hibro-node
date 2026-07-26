@@ -314,7 +314,7 @@ export class CoreTransport {
         if (
           (message.payload as { retryable?: boolean }).retryable === false
         ) {
-          this.acknowledgeSourceMessage(message);
+          this.acknowledgeSourceMessage(message, true);
         }
         break;
       default:
@@ -408,8 +408,19 @@ export class CoreTransport {
     }
     if (this.artifactSyncRequired) {
       this.artifactSyncRequired = false;
+      for (const run of runs.filter((candidate) => isTerminalStatus(candidate.status))) {
+        this.send(
+          "run.snapshot",
+          { run },
+          { correlationId: run.id, requiresAck: true },
+        );
+      }
       for (const artifact of await this.manager.listArtifacts()) {
-        this.forwardArtifact(artifact);
+        this.forwardArtifact(artifact, true);
+      }
+    } else {
+      for (const artifact of await this.manager.listArtifacts()) {
+        if (artifact.sync?.status === "failed") this.forwardArtifact(artifact);
       }
     }
   }
@@ -623,14 +634,30 @@ export class CoreTransport {
     }
   }
 
-  private forwardArtifact(artifact: ArtifactRecord): void {
-    this.send(
+  private forwardArtifact(
+    artifact: ArtifactRecord,
+    retryPending = false,
+  ): void {
+    const settings = this.manager.getSettings();
+    if (!settings.coreEnabled || !settings.coreUrl) return;
+    const existing = this.manager.getArtifactSyncRecord(artifact.id);
+    if (
+      existing &&
+      existing.sha256 === artifact.sha256 &&
+      existing.targetCore === settings.coreUrl &&
+      (["uploading", "synced"].includes(existing.status) ||
+        (existing.status === "pending" && !retryPending))
+    ) {
+      return;
+    }
+    const messageId = this.send(
       "artifact.manifest",
       {
         artifact: {
           ...artifact,
           content: undefined,
           localPath: undefined,
+          sync: undefined,
           contentType: artifact.contentType ?? "text/markdown",
           sizeBytes:
             artifact.sizeBytes ??
@@ -640,6 +667,9 @@ export class CoreTransport {
       },
       { requiresAck: true, correlationId: artifact.runId },
     );
+    if (messageId) {
+      this.manager.setArtifactSync(artifact, "pending", { messageId });
+    }
   }
 
   private async handleArtifactUploadAuthorized(
@@ -658,6 +688,7 @@ export class CoreTransport {
       this.uploadingArtifacts.delete(payload.artifactId);
       throw new Error(`artifact is unavailable for upload: ${payload.artifactId}`);
     }
+    this.manager.setArtifactSync(artifact, "uploading");
     try {
       const settings = this.manager.getSettings();
       const base = new URL(settings.coreUrl ?? "");
@@ -679,7 +710,7 @@ export class CoreTransport {
       if (!response.ok) {
         throw new Error(`object upload returned HTTP ${response.status}`);
       }
-      this.send(
+      const completionMessageId = this.send(
         "artifact.upload.complete",
         {
           artifactId: artifact.id,
@@ -689,18 +720,26 @@ export class CoreTransport {
         },
         { requiresAck: true, correlationId: artifact.id },
       );
+      this.manager.setArtifactSync(artifact, "uploading", {
+        messageId: completionMessageId,
+      });
     } catch (error) {
-      this.send(
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const completionMessageId = this.send(
         "artifact.upload.complete",
         {
           artifactId: artifact.id,
           status: "failed",
           sizeBytes: artifact.sizeBytes,
           sha256: artifact.sha256,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage,
         },
         { requiresAck: true, correlationId: artifact.id },
       );
+      this.manager.setArtifactSync(artifact, "failed", {
+        messageId: completionMessageId,
+        error: errorMessage,
+      });
     } finally {
       this.uploadingArtifacts.delete(payload.artifactId);
     }
@@ -710,9 +749,10 @@ export class CoreTransport {
     type: Parameters<typeof createCoreEnvelope>[0],
     payload: unknown,
     fields: Record<string, unknown> = {},
-  ): void {
-    this.sequence += 1;
+  ): string | undefined {
     const settings = this.manager.getSettings();
+    if (!settings.coreEnabled) return undefined;
+    this.sequence += 1;
     const message = createCoreEnvelope(type, payload, {
       nodeId: settings.nodeId,
       sequence: this.sequence,
@@ -732,6 +772,7 @@ export class CoreTransport {
       this.socket?.send(envelopeJson);
       if (message.requiresAck) this.deferCoreMessage(message.messageId, 3_000);
     }
+    return message.messageId;
   }
 
   private isOpen(): boolean {
@@ -782,10 +823,48 @@ export class CoreTransport {
     );
   }
 
-  private acknowledgeSourceMessage(message: HibroCoreMessage): void {
-    const payload = message.payload as { messageId?: string };
+  private acknowledgeSourceMessage(
+    message: HibroCoreMessage,
+    failed = false,
+  ): void {
+    const payload = message.payload as {
+      messageId?: string;
+      artifact?: {
+        artifactId?: string;
+        sha256?: string;
+        status?: string;
+      };
+    };
     if (payload.messageId) {
+      const sync = this.manager.store.findArtifactSyncByMessage(
+        payload.messageId,
+      );
       this.manager.store.acknowledgeCoreMessage(payload.messageId);
+      const artifactConfirmed =
+        sync !== undefined &&
+        payload.artifact?.status === "available" &&
+        payload.artifact.artifactId === sync.artifactId &&
+        payload.artifact.sha256 === sync.sha256;
+      if (sync && (failed || artifactConfirmed || sync.status === "uploading")) {
+        this.manager.store.upsertArtifactSync({
+          ...sync,
+          status: failed ? "failed" : "synced",
+          messageId: undefined,
+          error: failed
+            ? String(
+                (message.payload as { message?: unknown }).message ??
+                  "Core rejected artifact synchronization.",
+              )
+            : undefined,
+          updatedAt: new Date().toISOString(),
+        });
+      } else if (sync) {
+        this.manager.store.upsertArtifactSync({
+          ...sync,
+          messageId: undefined,
+          updatedAt: new Date().toISOString(),
+        });
+      }
     }
   }
 

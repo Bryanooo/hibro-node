@@ -229,10 +229,21 @@ POST   /v1/capabilities/refresh
 系统配置和 Agent 定义都写入数据目录。运行历史保留天数会在服务启动和保存设置时清理
 过期且已经结束的 Run；活动 Run 不会被清理。
 
+每个产物都带有独立的 Core 同步状态，并在产物页面和 `GET /v1/artifacts` 中展示：
+
+- `local_only`：仅保存在 Node，本机独立运行时这是正常状态；
+- `pending`：Node 已配置 Core，等待连接或上传授权；
+- `uploading`：正在上传对象存储，或等待 Core 确认；
+- `synced`：对象已上传，并且 Core 已确认入库；
+- `failed`：本次同步失败，Node 会在重连或下一轮同步时重试。
+
+同步状态保存在 SQLite 中。Node 后续注册到 Core 时，会自动补传此前仅保存在本机的历史
+产物；Node 取消 Core 配置不会删除本地产物。
+
 ## 数据存储
 
 生产运行使用 Node.js 内置 SQLite，数据库为
-`HIBRO_NODE_DATA_DIR/hibro.db`。Run、顺序事件与后续 Core Outbox 使用事务表，
+`HIBRO_NODE_DATA_DIR/hibro.db`。Run、顺序事件、产物同步状态与 Core Outbox 使用事务表，
 数据库启用 WAL；Agent 定义和系统设置暂时保留为可读、易备份的 JSON。
 
 旧版 `runs/*/state.json` 和 `events.jsonl` 会在首次启动时幂等导入 SQLite，源文件保留，

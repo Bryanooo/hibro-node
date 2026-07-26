@@ -290,6 +290,21 @@ complete manifest sync. Existing objects with the same stable artifact identity 
 not uploaded again. The legacy `artifact.upload` chunk message remains parseable during rolling
 upgrades but new Nodes do not emit it.
 
+Node persists a local synchronization state for every artifact:
+
+- `local_only`: Core integration is disabled; the artifact remains fully usable on Node.
+- `pending`: Core integration is enabled and the manifest is waiting to be delivered or accepted.
+- `uploading`: upload authorization was received and the object upload/final acknowledgement is
+  in progress.
+- `synced`: the object upload completed and Core acknowledged `artifact.upload.complete`.
+- `failed`: upload or permanent Core processing failed; the diagnostic error is retained.
+
+`synced` therefore means both conditions are true: the object bytes reached the configured
+storage provider and the Core catalog accepted the completion message. A successful HTTP PUT
+alone must not set `synced`. Sync state is keyed by artifact identity, SHA-256 and Core URL so a
+changed artifact or a different Core is sent again. When a standalone Node is registered later,
+it first sends terminal Run snapshots and then manifests for all historical artifacts.
+
 ## 10. Acknowledgement, retry and outbox
 
 Messages requiring acknowledgement are written to the local SQLite `core_outbox` before send.
@@ -299,6 +314,12 @@ Messages requiring acknowledgement are written to the local SQLite `core_outbox`
 - `accepted`: persisted and accepted;
 - `duplicate`: already persisted with the same identity;
 - `rejected`: permanent validation or policy rejection.
+
+For `artifact.manifest` and `artifact.upload.complete`, Core includes
+`payload.artifact={artifactId,sha256,status:"available"}` when the exact object is already
+available. This backward-compatible acknowledgement extension closes the historical-resync and
+deduplication path without requiring an unnecessary second upload. Node may mark the artifact
+`synced` only when this confirmation matches its current artifact identity and SHA-256.
 
 Retry schedule:
 

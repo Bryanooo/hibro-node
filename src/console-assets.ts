@@ -492,6 +492,10 @@ input:focus, textarea:focus, select:focus { border-color: #66764b; box-shadow: 0
 .artifact-card-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .artifact-card-top span { color: var(--lime); font: 8px/1 var(--mono); }
 .artifact-card-top time { color: var(--quiet); font: 8px/1 var(--mono); }
+.artifact-card-top .artifact-sync { margin-left: auto; padding: 4px 6px; border: 1px solid var(--border); color: var(--quiet); }
+.artifact-card-top .artifact-sync.synced { border-color: #405f42; color: var(--lime); }
+.artifact-card-top .artifact-sync.pending, .artifact-card-top .artifact-sync.uploading { border-color: #5c4a2f; color: var(--amber); }
+.artifact-card-top .artifact-sync.failed { border-color: #61343a; color: var(--red); }
 .artifact-card h3 { margin: 16px 0 9px; font-size: 12px; line-height: 1.4; }
 .artifact-preview { height: 66px; overflow: hidden; color: var(--muted); font-size: 9px; line-height: 1.65; white-space: pre-wrap; }
 .artifact-card-foot { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--soft-border); display: flex; justify-content: space-between; color: var(--quiet); font: 8px/1 var(--mono); }
@@ -1296,6 +1300,16 @@ function filteredArtifacts() {
   });
 }
 
+function artifactSyncLabel(artifact) {
+  return {
+    local_only: "仅本地",
+    pending: "待同步",
+    uploading: "同步中",
+    synced: "已同步",
+    failed: "同步失败",
+  }[artifact.sync?.status] || "仅本地";
+}
+
 function renderArtifacts() {
   const grid = byId("artifact-grid");
   clear(grid);
@@ -1307,7 +1321,17 @@ function renderArtifacts() {
     card.setAttribute("role", "button");
     card.setAttribute("aria-label", "查看产出 " + artifact.title);
     const top = el("div", "artifact-card-top");
-    top.append(el("span", "", engineLabel(artifact.engine).toUpperCase()), el("time", "", formatDate(artifact.createdAt)));
+    const sync = el(
+      "span",
+      "artifact-sync " + (artifact.sync?.status || "local_only"),
+      artifactSyncLabel(artifact),
+    );
+    if (artifact.sync?.error) sync.title = artifact.sync.error;
+    top.append(
+      el("span", "", engineLabel(artifact.engine).toUpperCase()),
+      sync,
+      el("time", "", formatDate(artifact.createdAt)),
+    );
     const runtime = agentRuntime(artifact.agentId);
     const foot = el("div", "artifact-card-foot");
     foot.append(el("span", "", runtime?.agent.name || artifact.agentId || "历史运行"), el("span", "", shortId(artifact.runId)));
@@ -1694,7 +1718,17 @@ async function openArtifact(artifactId) {
   state.selectedArtifactId = artifactId;
   const runtime = agentRuntime(artifact.agentId);
   byId("artifact-title").textContent = artifact.title;
-  byId("artifact-meta").textContent = (runtime?.agent.name || artifact.agentId || "历史运行") + " · " + engineLabel(artifact.engine) + " · " + formatDate(artifact.createdAt) + " · " + shortId(artifact.runId);
+  byId("artifact-meta").textContent =
+    (runtime?.agent.name || artifact.agentId || "历史运行") +
+    " · " +
+    engineLabel(artifact.engine) +
+    " · " +
+    artifactSyncLabel(artifact) +
+    (artifact.sync?.error ? "（" + artifact.sync.error + "）" : "") +
+    " · " +
+    formatDate(artifact.createdAt) +
+    " · " +
+    shortId(artifact.runId);
   const content = byId("artifact-content");
   clear(content);
   if (artifact.previewKind === "image") {

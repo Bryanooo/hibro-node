@@ -140,6 +140,13 @@ export interface MessageAckPayload {
   status: "accepted" | "duplicate" | "rejected";
   persistedAt?: string | undefined;
   error?: ProtocolErrorPayload | undefined;
+  artifact?:
+    | {
+        artifactId: string;
+        sha256: string;
+        status: "available";
+      }
+    | undefined;
 }
 
 export interface ProtocolErrorPayload {

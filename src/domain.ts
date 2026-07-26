@@ -169,6 +169,13 @@ export interface ArtifactRecord {
   encoding?: "utf8" | "base64" | undefined;
   createdAt: string;
   workspacePath?: string | undefined;
+  sync?: {
+    status: "local_only" | "pending" | "uploading" | "synced" | "failed";
+    synced: boolean;
+    target: "hibro-core";
+    updatedAt?: string | undefined;
+    error?: string | undefined;
+  } | undefined;
 }
 
 export interface CreateRunInput {

@@ -270,6 +270,7 @@ test("collects text and binary deliverables from the isolated artifact directory
     "markdown",
   );
   const image = artifacts.find((artifact) => artifact.fileName === "pixel.png");
+  assert.ok(image);
   assert.equal(image?.previewKind, "image");
   assert.equal(image?.encoding, "base64");
   assert.match(image?.sha256 ?? "", /^[a-f0-9]{64}$/);
@@ -278,4 +279,20 @@ test("collects text and binary deliverables from the isolated artifact directory
   assert.equal(video?.contentType, "video/mp4");
   assert.ok(video?.localPath);
   assert.equal(video?.content, undefined);
+  assert.ok(artifacts.every((artifact) => artifact.sync?.status === "local_only"));
+
+  await instance.updateSettings({
+    coreEnabled: true,
+    coreUrl: "ws://127.0.0.1:17400",
+    coreToken: "enrollment-test-token",
+  });
+  const pending = (await instance.listArtifacts()).filter(
+    (artifact) => artifact.runId === run.id,
+  );
+  assert.ok(pending.every((artifact) => artifact.sync?.status === "pending"));
+  instance.setArtifactSync(image, "synced");
+  assert.equal(
+    (await instance.getArtifact(image.id))?.sync?.status,
+    "synced",
+  );
 });

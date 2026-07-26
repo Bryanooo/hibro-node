@@ -91,3 +91,35 @@ test("SQLite store persists Core outbox messages until acknowledged", async () =
   sqlite.acknowledgeCoreMessage(messageId, new Date("2026-01-01T00:01:02.000Z"));
   assert.deepEqual(sqlite.pendingCoreMessages(new Date("2026-01-01T00:02:00.000Z")), []);
 });
+
+test("SQLite store persists artifact synchronization through Core acknowledgement", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hibro-artifact-sync-"));
+  const sqlite = new SqliteRunStore(root);
+  await sqlite.init();
+  const runId = randomUUID();
+  await sqlite.create(fixtureRun(runId));
+  const artifactId = `artifact_${runId}`;
+  const completionMessageId = randomUUID();
+  sqlite.upsertArtifactSync({
+    artifactId,
+    runId,
+    sha256: "a".repeat(64),
+    targetCore: "ws://core.example.test",
+    status: "uploading",
+    messageId: completionMessageId,
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  });
+  assert.equal(
+    sqlite.findArtifactSyncByMessage(completionMessageId)?.artifactId,
+    artifactId,
+  );
+  sqlite.upsertArtifactSync({
+    ...(sqlite.getArtifactSync(artifactId)!),
+    status: "synced",
+    messageId: undefined,
+    updatedAt: "2026-01-01T00:01:00.000Z",
+  });
+  assert.equal(sqlite.getArtifactSync(artifactId)?.status, "synced");
+  await sqlite.pruneTerminalRunsBefore(new Date("2026-02-01T00:00:00.000Z"));
+  assert.equal(sqlite.getArtifactSync(artifactId), undefined);
+});

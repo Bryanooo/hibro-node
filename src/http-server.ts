@@ -14,7 +14,12 @@ import { join } from "node:path";
 import { CONSOLE_CSS, CONSOLE_HTML, CONSOLE_JS } from "./console-assets.ts";
 import { CORE_MESSAGE_TYPES, HIBRO_CORE_PROTOCOL } from "./core-protocol.ts";
 import type { ConversationService } from "./conversation-service.ts";
-import { isNodeControlRequestAuthorized } from "./node-access.ts";
+import {
+  createNodeControlSession,
+  isNodeControlRequestAuthorized,
+  NODE_CONTROL_SESSION_COOKIE,
+  NODE_CONTROL_SESSION_TTL_SECONDS,
+} from "./node-access.ts";
 
 export interface HttpServerOptions {
   host: string;
@@ -58,6 +63,87 @@ function sendAsset(
     "referrer-policy": "no-referrer",
   });
   response.end(body);
+}
+
+function loginPage(next: string, invalid = false): string {
+  const safeNext = next === "/console" ? next : "/console";
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>登录 Hibro Node</title>
+  <link rel="icon" href="/console/favicon.png">
+  <style>
+    :root{color-scheme:dark;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#071018;color:#eef6ff}
+    main{width:min(420px,calc(100vw - 32px));padding:32px;border:1px solid #243748;border-radius:20px;background:#0d1822;box-shadow:0 24px 80px #0008}
+    img{width:52px;height:52px;border-radius:14px}small{display:block;margin-top:12px;color:#7f9bb1;letter-spacing:.12em}
+    h1{margin:10px 0 8px;font-size:27px}p{margin:0 0 22px;color:#a9bdcc;line-height:1.6}
+    label{display:block;margin-bottom:8px;font-size:14px;color:#cad9e4}input{width:100%;height:46px;padding:0 13px;border:1px solid #314a5e;border-radius:10px;background:#07121b;color:#fff;font:inherit}
+    input:focus{outline:2px solid #37c7d5;outline-offset:1px}.error{margin:0 0 15px;padding:10px 12px;border-radius:9px;background:#4a1820;color:#ffd8dc}
+    button{width:100%;height:46px;margin-top:16px;border:0;border-radius:10px;background:#42d3c8;color:#04201f;font-weight:750;font-size:15px;cursor:pointer}
+    footer{margin-top:20px;color:#7892a5;font-size:12px;line-height:1.55}
+    code{color:#b8dce2}
+  </style>
+</head>
+<body>
+  <main>
+    <img src="/console/hibro-mark.png" alt="">
+    <small>HIBRO NODE CONTROL</small>
+    <h1>登录本地 Node</h1>
+    <p>输入 Node 控制口令。登录会保存在当前浏览器 12 小时，不会再弹出系统认证窗口。</p>
+    ${invalid ? '<div class="error" role="alert">控制口令不正确，请重试。</div>' : ""}
+    <form method="post" action="/login">
+      <input type="hidden" name="next" value="${safeNext}">
+      <label for="token">Node 控制口令</label>
+      <input id="token" name="token" type="password" required autocomplete="current-password" autofocus>
+      <button type="submit">登录 Hibro Node</button>
+    </form>
+    <footer>本地运行：<code>npm run control-token</code><br>Docker：<code>docker compose exec hibro-node npm run control-token</code></footer>
+  </main>
+</body>
+</html>`;
+}
+
+function sendLoginPage(
+  response: ServerResponse,
+  statusCode: number,
+  next: string,
+  invalid = false,
+): void {
+  response.writeHead(statusCode, {
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "no-store",
+    "content-security-policy":
+      "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer",
+  });
+  response.end(loginPage(next, invalid));
+}
+
+async function readFormBody(request: IncomingMessage): Promise<URLSearchParams> {
+  const contentType = request.headers["content-type"]?.split(";", 1)[0]?.trim();
+  if (contentType !== "application/x-www-form-urlencoded") {
+    throw new Error("content-type must be application/x-www-form-urlencoded");
+  }
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buffer.length;
+    if (size > 16_384) throw new Error("Login form exceeds 16 KiB");
+    chunks.push(buffer);
+  }
+  return new URLSearchParams(Buffer.concat(chunks).toString("utf8"));
+}
+
+function isSameOrigin(request: IncomingMessage): boolean {
+  const origin = request.headers.origin;
+  if (!origin) return true;
+  const expectedOrigin = `${request.headers["x-forwarded-proto"] ?? "http"}://${request.headers.host}`;
+  return origin === expectedOrigin;
 }
 
 async function sendImage(response: ServerResponse, filename: string): Promise<void> {
@@ -121,6 +207,40 @@ export function createHibroHttpServer(options: HttpServerOptions): Server {
   return createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", "http://hibro-node.local");
+      if (request.method === "GET" && url.pathname === "/login") {
+        sendLoginPage(response, 200, url.searchParams.get("next") ?? "/console");
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/login") {
+        if (!isSameOrigin(request)) {
+          sendJson(response, 403, { error: "origin_not_allowed" });
+          return;
+        }
+        const form = await readFormBody(request);
+        const next = form.get("next") ?? "/console";
+        const suppliedToken = form.get("token") ?? "";
+        const authorization = `Basic ${Buffer.from(`hibro:${suppliedToken}`).toString("base64")}`;
+        const authorized = isNodeControlRequestAuthorized(
+          { headers: { authorization } } as IncomingMessage,
+          options.controlToken,
+        );
+        if (!authorized) {
+          sendLoginPage(response, 401, next, true);
+          return;
+        }
+        const session = createNodeControlSession(options.controlToken);
+        const secure =
+          request.headers["x-forwarded-proto"] === "https" ||
+          Boolean((request.socket as { encrypted?: boolean }).encrypted);
+        response.writeHead(303, {
+          location:
+            next === "/console" ? next : "/console",
+          "cache-control": "no-store",
+          "set-cookie": `${NODE_CONTROL_SESSION_COOKIE}=${encodeURIComponent(session)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${NODE_CONTROL_SESSION_TTL_SECONDS}${secure ? "; Secure" : ""}`,
+        });
+        response.end();
+        return;
+      }
       const isPublic =
         request.method === "GET" &&
         (url.pathname === "/health" ||
@@ -130,23 +250,34 @@ export function createHibroHttpServer(options: HttpServerOptions): Server {
         !isPublic &&
         !isNodeControlRequestAuthorized(request, options.controlToken)
       ) {
-        response.writeHead(401, {
-          "content-type": "application/json; charset=utf-8",
-          "cache-control": "no-store",
-          "www-authenticate": 'Basic realm="Hibro Node", charset="UTF-8"',
-        });
-        response.end('{"error":"authentication_required"}\n');
+        if (
+          request.method === "GET" &&
+          (url.pathname === "/" || url.pathname === "/console")
+        ) {
+          response.writeHead(302, {
+            location: `/login?next=${encodeURIComponent(url.pathname === "/" ? "/console" : `${url.pathname}${url.search}`)}`,
+            "cache-control": "no-store",
+          });
+          response.end();
+        } else {
+          sendJson(response, 401, { error: "authentication_required" });
+        }
         return;
       }
       if (!["GET", "HEAD", "OPTIONS"].includes(request.method ?? "")) {
-        const origin = request.headers.origin;
-        if (origin) {
-          const expectedOrigin = `${request.headers["x-forwarded-proto"] ?? "http"}://${request.headers.host}`;
-          if (origin !== expectedOrigin) {
-            sendJson(response, 403, { error: "origin_not_allowed" });
-            return;
-          }
+        if (!isSameOrigin(request)) {
+          sendJson(response, 403, { error: "origin_not_allowed" });
+          return;
         }
+      }
+      if (request.method === "POST" && url.pathname === "/logout") {
+        response.writeHead(303, {
+          location: "/login",
+          "cache-control": "no-store",
+          "set-cookie": `${NODE_CONTROL_SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`,
+        });
+        response.end();
+        return;
       }
       if (request.method === "GET" && url.pathname === "/") {
         response.writeHead(302, { location: "/console" });

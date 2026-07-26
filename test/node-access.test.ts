@@ -5,8 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  createNodeControlSession,
   isNodeControlRequestAuthorized,
+  isNodeControlSessionValid,
   loadNodeControlCredential,
+  NODE_CONTROL_SESSION_COOKIE,
 } from "../src/node-access.ts";
 
 test("Node control credential is generated once with owner-only permissions", async () => {
@@ -28,5 +31,22 @@ test("Node control credential is generated once with owner-only permissions", as
     isNodeControlRequestAuthorized(request, generated.token),
     true,
   );
-});
 
+  const now = Date.now();
+  const session = createNodeControlSession(generated.token, now);
+  assert.equal(isNodeControlSessionValid(session, generated.token, now), true);
+  assert.equal(
+    isNodeControlSessionValid(session, generated.token, now + 13 * 60 * 60 * 1_000),
+    false,
+  );
+  assert.equal(isNodeControlSessionValid(`${session}x`, generated.token, now), false);
+  const cookieRequest = {
+    headers: {
+      cookie: `${NODE_CONTROL_SESSION_COOKIE}=${encodeURIComponent(session)}`,
+    },
+  } as IncomingMessage;
+  assert.equal(
+    isNodeControlRequestAuthorized(cookieRequest, generated.token),
+    true,
+  );
+});

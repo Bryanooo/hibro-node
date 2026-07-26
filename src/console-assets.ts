@@ -47,6 +47,7 @@ export const CONSOLE_HTML = `<!doctype html>
           <div class="top-actions">
             <span class="last-refresh" id="last-refresh">尚未刷新</span>
             <button type="button" class="icon-button" id="refresh-button" aria-label="刷新全部数据" title="刷新">↻</button>
+            <form method="post" action="/logout"><button type="submit" class="icon-button" aria-label="退出 Node 控制台" title="退出">⇥</button></form>
             <button type="button" class="primary-button" id="global-new-run">＋ 发起运行</button>
           </div>
         </header>
@@ -760,6 +761,10 @@ function notify(message, kind) {
 
 async function json(url, options) {
   const response = await fetch(url, options);
+  if (response.status === 401) {
+    window.location.assign("/login?next=%2Fconsole");
+    throw new Error("登录已过期，正在重新登录");
+  }
   const contentType = response.headers.get("content-type") || "";
   const body = contentType.includes("application/json") ? await response.json() : await response.text();
   if (!response.ok) {

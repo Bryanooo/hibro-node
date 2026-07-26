@@ -56,9 +56,78 @@ test("HTTP API creates and returns a run", async (context) => {
 
   const anonymousSettings = await fetch(`${base}/v1/settings`);
   assert.equal(anonymousSettings.status, 401);
-  assert.match(
-    anonymousSettings.headers.get("www-authenticate") ?? "",
-    /Hibro Node/,
+  assert.equal(anonymousSettings.headers.get("www-authenticate"), null);
+
+  const anonymousConsole = await fetch(`${base}/console`, {
+    redirect: "manual",
+  });
+  assert.equal(anonymousConsole.status, 302);
+  assert.equal(anonymousConsole.headers.get("location"), "/login?next=%2Fconsole");
+
+  const loginPage = await fetch(`${base}/login?next=%2Fconsole`);
+  assert.equal(loginPage.status, 200);
+  assert.match(await loginPage.text(), /登录本地 Node/);
+
+  const invalidLogin = await fetch(`${base}/login`, {
+    method: "POST",
+    redirect: "manual",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      origin: base,
+    },
+    body: new URLSearchParams({ token: "wrong", next: "/console" }),
+  });
+  assert.equal(invalidLogin.status, 401);
+  assert.equal(invalidLogin.headers.get("www-authenticate"), null);
+  assert.match(await invalidLogin.text(), /控制口令不正确/);
+
+  const validLogin = await fetch(`${base}/login`, {
+    method: "POST",
+    redirect: "manual",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      origin: base,
+    },
+    body: new URLSearchParams({ token: CONTROL_TOKEN, next: "/console" }),
+  });
+  assert.equal(validLogin.status, 303);
+  assert.equal(validLogin.headers.get("location"), "/console");
+  const sessionCookie = validLogin.headers.get("set-cookie")?.split(";", 1)[0];
+  assert.match(sessionCookie ?? "", /^hibro_node_session=/);
+  assert.match(validLogin.headers.get("set-cookie") ?? "", /HttpOnly/);
+  assert.match(validLogin.headers.get("set-cookie") ?? "", /SameSite=Strict/);
+  const sessionConsole = await fetch(`${base}/console`, {
+    headers: { cookie: sessionCookie ?? "" },
+  });
+  assert.equal(sessionConsole.status, 200);
+  assert.match(await sessionConsole.text(), /Hibro Node Console/);
+  assert.match(await (await authenticatedFetch(`${base}/console`)).text(), /退出 Node 控制台/);
+
+  const logout = await fetch(`${base}/logout`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { cookie: sessionCookie ?? "", origin: base },
+  });
+  assert.equal(logout.status, 303);
+  assert.equal(logout.headers.get("location"), "/login");
+  assert.match(logout.headers.get("set-cookie") ?? "", /Max-Age=0/);
+
+  const crossOriginLogin = await fetch(`${base}/login`, {
+    method: "POST",
+    redirect: "manual",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      origin: "https://attacker.example",
+    },
+    body: new URLSearchParams({ token: CONTROL_TOKEN, next: "/console" }),
+  });
+  assert.equal(crossOriginLogin.status, 403);
+
+  assert.equal(
+    (await fetch(`${base}/console/styles.css`)).headers.get(
+      "www-authenticate",
+    ),
+    null,
   );
 
   const consolePage = await authenticatedFetch(`${base}/console`);

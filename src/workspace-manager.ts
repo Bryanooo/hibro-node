@@ -1,7 +1,12 @@
-import { access, cp, mkdir, rm } from "node:fs/promises";
+import { access, cp, mkdir, readdir, rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { basename, join, resolve } from "node:path";
-import type { AgentDefinition, WorkspaceLease } from "./domain.ts";
+import type {
+  AgentDefinition,
+  AgentSource,
+  WorkspaceLease,
+  WorkspaceStrategy,
+} from "./domain.ts";
 import { createId } from "./identity.ts";
 
 export class WorkspaceBusyError extends Error {
@@ -14,6 +19,7 @@ export class WorkspaceBusyError extends Error {
 export interface AgentRuntimePaths {
   root: string;
   workspace: string;
+  metadata: string;
   state: string;
   temp: string;
   artifacts: string;
@@ -32,13 +38,15 @@ export class WorkspaceManager {
 
   pathsFor(agentId: string): AgentRuntimePaths {
     const root = join(this.rootDir, agentId);
+    const metadata = join(root, ".hibro");
     return {
       root,
       workspace: join(root, "workspace"),
-      state: join(root, "state"),
-      temp: join(root, "tmp"),
+      metadata,
+      state: join(metadata, "state"),
+      temp: join(metadata, "tmp"),
       artifacts: join(root, "artifacts"),
-      runs: join(root, "runs"),
+      runs: join(metadata, "runs"),
     };
   }
 
@@ -49,28 +57,41 @@ export class WorkspaceManager {
     return join(paths.runs, "<run-id>", "workspace");
   }
 
-  async acquire(agent: AgentDefinition, runId: string): Promise<WorkspaceLease> {
+  async acquire(
+    agent: AgentDefinition,
+    runId: string,
+    sourceOverride?: AgentSource,
+  ): Promise<WorkspaceLease> {
     const active = this.activeByAgent.get(agent.id) ?? new Set<string>();
     if (active.size >= agent.maxConcurrency) throw new WorkspaceBusyError(agent.id);
     active.add(runId);
     this.activeByAgent.set(agent.id, active);
     try {
-      await access(agent.source.path);
+      const source = sourceOverride ?? agent.source;
+      if (source) await access(source.path);
       const paths = this.pathsFor(agent.id);
       await Promise.all([
         mkdir(paths.state, { recursive: true }),
         mkdir(paths.temp, { recursive: true }),
         mkdir(paths.artifacts, { recursive: true }),
       ]);
-      const workspace = await this.resolveWorkspace(agent, runId, paths);
+      const strategy: WorkspaceStrategy = sourceOverride
+        ? "per-run"
+        : agent.workspace.strategy;
+      const workspace = await this.resolveWorkspace(
+        strategy,
+        source,
+        runId,
+        paths,
+      );
       if (this.activeByPath.has(workspace.path)) throw new WorkspaceBusyError(agent.id);
       this.activeByPath.set(workspace.path, runId);
       return {
         id: createId("lease"),
-        strategy: agent.workspace.strategy,
+        strategy,
         access: agent.workspace.access,
         path: workspace.path,
-        sourcePath: agent.source.path,
+        ...(source ? { sourcePath: source.path } : {}),
         gitRepositoryPath: workspace.gitRepositoryPath,
         statePath: paths.state,
         tempPath: paths.temp,
@@ -92,6 +113,9 @@ export class WorkspaceManager {
     if (!lease || lease.strategy === "persistent") return;
     if (lease.materialization === "git-worktree") {
       const repositoryPath = lease.gitRepositoryPath ?? lease.sourcePath;
+      if (!repositoryPath) {
+        throw new Error("Git workspace lease is missing its repository path");
+      }
       try {
         await this.withGitRepository(repositoryPath, async () => {
           await this.git(repositoryPath, ["worktree", "remove", "--force", lease.path]);
@@ -113,7 +137,8 @@ export class WorkspaceManager {
   }
 
   private async resolveWorkspace(
-    agent: AgentDefinition,
+    strategy: WorkspaceStrategy,
+    source: AgentSource | undefined,
     runId: string,
     paths: AgentRuntimePaths,
   ): Promise<{
@@ -121,16 +146,20 @@ export class WorkspaceManager {
     materialization: WorkspaceLease["materialization"];
     gitRepositoryPath?: string | undefined;
   }> {
-    if (agent.workspace.strategy === "scratch") {
+    if (strategy === "scratch") {
       const path = join(paths.runs, runId, "scratch");
       await mkdir(path, { recursive: true });
       return { path, materialization: "scratch" };
     }
     const path =
-      agent.workspace.strategy === "persistent"
+      strategy === "persistent"
         ? paths.workspace
         : join(paths.runs, runId, "workspace");
-    return this.materialize(agent.source.path, path, paths.state);
+    if (!source) {
+      await mkdir(path, { recursive: true });
+      return { path, materialization: "empty" };
+    }
+    return this.materialize(source.path, path, paths.state);
   }
 
   private async materialize(
@@ -142,8 +171,13 @@ export class WorkspaceManager {
     materialization: WorkspaceLease["materialization"];
     gitRepositoryPath?: string | undefined;
   }> {
+    let targetExists = true;
     try {
       await access(targetPath);
+    } catch {
+      targetExists = false;
+    }
+    if (targetExists && (await readdir(targetPath)).length > 0) {
       const gitWorkspace = await this.isGitWorkspace(targetPath);
       let gitRepositoryPath: string | undefined;
       if (gitWorkspace) {
@@ -160,9 +194,9 @@ export class WorkspaceManager {
         materialization: gitWorkspace ? "git-worktree" : "directory-copy",
         gitRepositoryPath,
       };
-    } catch {
-      await mkdir(resolve(targetPath, ".."), { recursive: true });
     }
+    if (targetExists) await rm(targetPath, { recursive: true });
+    await mkdir(resolve(targetPath, ".."), { recursive: true });
     if (await this.hasGitHead(sourcePath)) {
       const gitRepositoryPath = join(statePath, "source.git");
       try {

@@ -11,7 +11,7 @@ Hibro Node 是 Hibro 的本地多 Agent 运行时。Agent 是一等实体，Run 
 ```text
 AgentDefinition
   ├─ engine: claude-code | codex | openclaw
-  ├─ source.path
+  ├─ source.path（可选的默认项目）
   ├─ workspace.strategy: persistent | per-run | scratch
   ├─ workspace.access: read-only | workspace-write
   ├─ model / instructions / allowedTools
@@ -45,7 +45,7 @@ Agent ID 完全由 Hibro Node 生成，格式为 `agt_<UUID>`。Web 控制台和
 `POST /v1/agents` 都不接受用户指定 ID，避免命名冲突以及未来多个 Node 注册到 Core
 时发生全局冲突。
 
-首次启动会在 `HIBRO_NODE_DATA_DIR/agents.json` 创建六个 Agent；已有数据目录会按引擎
+首次启动会在 `HIBRO_NODE_DATA_DIR/.hibro/agents.json` 创建六个 Agent；已有数据目录会按引擎
 补足到每种两个，不删除已有 Agent，也不改变已有 ID：
 
 | Agent | 引擎 | 生命周期 | 权限 |
@@ -57,29 +57,31 @@ Agent ID 完全由 Hibro Node 生成，格式为 `agt_<UUID>`。Web 控制台和
 | OpenClaw 研究助手 | OpenClaw | 持久工作区 | 只读 |
 | OpenClaw 自动化助手 | OpenClaw | 持久工作区 | 可写 |
 
-它们可以使用同一个源项目，但运行目录永远不同。默认源项目为启动服务时的当前目录，
-也可以通过
-`HIBRO_DEFAULT_PROJECT_ROOT` 或 `--project-root` 指定。
+默认 Agent 不绑定项目，而是在各自的空白专属空间中启动。需要处理代码时，可以给
+Agent 配置默认项目，也可以只在创建某次 Run 时临时挂载项目；无论哪种方式，Agent
+的实际运行目录都不会是只读源目录。
 
 旧版 `projectRoot`、`workspaceMode` 会在启动时自动迁移到新结构；已经存在的 Agent ID
 和历史 Run 不会改变。
 
-## 初始项目与 Agent 专属空间
+## 默认项目、Run 项目与 Agent 专属空间
 
-控制台中的“初始项目”表示 Agent 第一次创建工作副本时从哪里获得文件，对应 API
-内部的 `source.path`。它不是 Agent 实际工作的目录。每个 Agent 都拥有自己的
-“Agent 专属空间”：
+Agent 本身不等于代码项目。“默认项目”是可选项，对应 Agent 定义中的 `source.path`；
+创建 Run 时还可以通过 Run 自己的 `source.path` 临时挂载另一个项目。源目录只用来
+创建隔离工作副本，不会直接成为引擎工作目录。
 
 ```text
 HIBRO_NODE_DATA_DIR/
+  .hibro/              # Node 内部元数据（SQLite、设置、Agent 注册表）
   agents/
     <agent-id>/
       workspace/       # persistent 生命周期
-      state/           # Agent 状态与后续会话数据
-      tmp/             # 临时文件
-      artifacts/       # Agent 产出目录
-      runs/
-        <run-id>/      # per-run 或 scratch 生命周期
+      artifacts/       # 可预览、可同步的 Agent 产出
+      .hibro/           # 此 Agent 的内部元数据
+        state/          # 引擎状态、会话和 Git 管理仓库
+        tmp/            # 临时文件
+        runs/
+          <run-id>/     # per-run、scratch 或 Run 临时项目
 ```
 
 | 生命周期 | 用途 |
@@ -89,9 +91,13 @@ HIBRO_NODE_DATA_DIR/
 | `scratch` | 每个 Run 使用空白临时目录，Run 结束后清理 |
 
 `read-only` 和 `workspace-write` 独立控制引擎权限。Git 项目使用 detached worktree
-物化，其可写 Git 管理元数据保存在 Agent 私有 `state/source.git` 中；因此 Docker
-可以继续把初始项目挂载为只读。未提交或非 Git 项目使用目录复制。源项目本身不会被
-Agent 直接作为运行目录。
+物化，其可写 Git 管理元数据保存在 Agent 私有 `.hibro/state/source.git` 中；因此
+Docker 可以继续把项目挂载为只读。未提交或非 Git 项目使用目录复制。没有项目时会
+创建普通空目录。
+
+Run 级项目总是进入 `.hibro/runs/<run-id>/workspace`，Run 结束后清理，不会覆盖
+Agent 长期使用的 `workspace/`。这让同一个 Agent 可以先做普通问答，再临时处理不同
+项目。
 
 每次 Run 都会保存实际的 `WorkspaceLease`。默认并发为 1；同一个私有工作目录不会
 同时分配给多个 Run。
@@ -202,16 +208,21 @@ curl -X POST http://127.0.0.1:7331/v1/agents \
   -d '{
     "name": "代码审查",
     "engine": "codex",
-    "source": {
-      "type": "local",
-      "path": "/workspace/project"
-    },
     "workspace": {
       "strategy": "persistent",
       "access": "workspace-write"
     },
     "maxConcurrency": 1
   }'
+```
+
+上面的 Agent 会从空白空间启动。若要设置默认项目，可额外传入：
+
+```json
+"source": {
+  "type": "local",
+  "path": "/workspace/project"
+}
 ```
 
 让指定 Agent 执行：
@@ -222,6 +233,10 @@ curl -X POST http://127.0.0.1:7331/v1/runs \
   -d '{
     "agentId": "agt_...",
     "prompt": "分析当前项目并给出三条改进建议",
+    "source": {
+      "type": "local",
+      "path": "/workspace/project"
+    },
     "sessionKey": "project-review",
     "options": {
       "timeoutMs": 300000
@@ -229,7 +244,8 @@ curl -X POST http://127.0.0.1:7331/v1/runs \
   }'
 ```
 
-相同 Agent、Workspace 与 `sessionKey` 会自动续接最近会话。传入
+省略 Run 的 `source` 时使用 Agent 的默认项目；两者都未配置时使用 Agent 的空白
+专属空间。相同 Agent、Workspace 与 `sessionKey` 会自动续接最近会话。传入
 `"freshSession": true` 可强制新建会话。
 
 对话 API：
@@ -304,12 +320,14 @@ POST   /v1/capabilities/refresh
 ## 数据存储
 
 生产运行使用 Node.js 内置 SQLite，数据库为
-`HIBRO_NODE_DATA_DIR/hibro.db`。Run、顺序事件、产物同步状态与 Core Outbox 使用事务表，
+`HIBRO_NODE_DATA_DIR/.hibro/hibro.db`。Run、顺序事件、产物同步状态与 Core Outbox 使用事务表，
 数据库启用 WAL；Agent 定义和系统设置暂时保留为可读、易备份的 JSON。
 
-旧版 `runs/*/state.json` 和 `events.jsonl` 会在首次启动时幂等导入 SQLite，源文件保留，
-不会被删除。这个混合方案适合单机 Hibro Node；只有未来让多个 Node 实例共享同一运行
-数据库时，才需要考虑 PostgreSQL 等外部数据库。设计决策见
+旧版根目录中的数据库、JSON 与 Run 元数据会在启动时原地迁移进 `.hibro/`；Agent
+原有的 `state/`、`tmp/` 和 `runs/` 也会迁入各自的 `.hibro/`，而 `workspace/` 和
+`artifacts/` 保持原位。迁移不会覆盖已经存在的新目录，并会修复 Git worktree 指针。
+这个混合方案适合单机 Hibro Node；只有未来让多个 Node 实例共享同一运行数据库时，
+才需要考虑 PostgreSQL 等外部数据库。设计决策见
 [`docs/adr-0001-sqlite-storage.md`](docs/adr-0001-sqlite-storage.md)。
 
 ## 配置
@@ -319,7 +337,7 @@ POST   /v1/capabilities/refresh
 | `HIBRO_NODE_HOST` | `127.0.0.1` | HTTP 监听地址 |
 | `HIBRO_NODE_PORT` | `7331` | HTTP 监听端口 |
 | `HIBRO_NODE_DATA_DIR` | `~/.hibro-node` | Agent、Run、事件和 Workspace 数据 |
-| `HIBRO_DEFAULT_PROJECT_ROOT` | 当前目录 | 首次创建默认 Agent 使用的项目目录 |
+| `HIBRO_DEFAULT_PROJECT_ROOT` | 当前目录 | 兼容旧安装；Docker 中可挂载项目的容器路径 |
 | `HIBRO_CLAUDE_BIN` | 自动发现 | Claude Code CLI |
 | `HIBRO_CODEX_BIN` | `codex` | Codex CLI |
 | `HIBRO_OPENCLAW_BIN` | `openclaw` | OpenClaw CLI |

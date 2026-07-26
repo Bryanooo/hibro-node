@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { CoreTransport } from "./core-transport.ts";
 import { ConversationStore } from "./conversation-store.ts";
 import { ConversationService } from "./conversation-service.ts";
+import { migrateNodeDataLayout } from "./data-layout.ts";
 
 type Flags = Record<string, string | boolean>;
 
@@ -67,6 +68,7 @@ async function buildManager(config: NodeConfig): Promise<{
   importedShellKeys: string[];
   shellWarning?: string | undefined;
 }> {
+  const layout = await migrateNodeDataLayout(config.dataDir);
   const shellEnvironment = config.importShellEnvironment
     ? await loadClaudeShellEnvironment({
         shellExecutable: config.shellExecutable,
@@ -74,13 +76,14 @@ async function buildManager(config: NodeConfig): Promise<{
     : { environment: {}, importedKeys: [] };
   return {
     manager: new RunManager({
-      store: new SqliteRunStore(config.dataDir),
+      dataDir: layout.root,
+      store: new SqliteRunStore(layout.metadata),
       agents: new FileAgentRegistry(
-        join(config.dataDir, "agents.json"),
+        layout.agentsRegistry,
         config.defaultProjectRoot,
       ),
-      workspaces: new WorkspaceManager(join(config.dataDir, "agents")),
-      settings: new FileSettingsStore(join(config.dataDir, "settings.json")),
+      workspaces: new WorkspaceManager(layout.agentsRoot),
+      settings: new FileSettingsStore(layout.settings),
       adapters: [
         new ClaudeCodeAdapter({
           executable: config.claudeExecutable,
@@ -180,7 +183,7 @@ async function serve(flags: Flags): Promise<void> {
   await manager.init();
   const conversations = new ConversationService(
     new ConversationStore(
-      manager.store.databasePath ?? join(config.dataDir, "hibro.db"),
+      manager.store.databasePath ?? join(config.dataDir, ".hibro", "hibro.db"),
     ),
     manager,
   );

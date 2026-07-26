@@ -82,7 +82,11 @@ export interface AgentDefinition {
   description?: string | undefined;
   engine: EngineType;
   enabled: boolean;
-  source: AgentSource;
+  /**
+   * Optional project used to seed the Agent workspace. Agents without a source
+   * start in an empty private workspace and can receive a project per Run.
+   */
+  source?: AgentSource | undefined;
   workspace: AgentWorkspaceConfig;
   maxConcurrency: number;
   model?: string | undefined;
@@ -104,6 +108,7 @@ export interface AgentRuntime {
   coreRegistration: AgentCoreRegistration;
   paths: {
     workspace: string;
+    metadata: string;
     state: string;
     temp: string;
     artifacts: string;
@@ -115,12 +120,12 @@ export interface WorkspaceLease {
   strategy: WorkspaceStrategy;
   access: WorkspaceAccessMode;
   path: string;
-  sourcePath: string;
+  sourcePath?: string | undefined;
   /** Writable Git metadata used to manage an isolated worktree. */
   gitRepositoryPath?: string | undefined;
   statePath: string;
   tempPath: string;
-  materialization: "git-worktree" | "directory-copy" | "scratch";
+  materialization: "git-worktree" | "directory-copy" | "empty" | "scratch";
   writable: boolean;
   artifactPath?: string | undefined;
   /** Legacy run-history compatibility. */
@@ -183,6 +188,8 @@ export interface ArtifactRecord {
 export interface CreateRunInput {
   prompt: string;
   agentId?: string | undefined;
+  /** Optional project attached only to this Run. */
+  source?: AgentSource | undefined;
   workspace?: string | undefined;
   sessionKey?: string | undefined;
   freshSession?: boolean | undefined;

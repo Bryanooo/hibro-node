@@ -53,7 +53,7 @@ test("HTTP API creates and returns a run", async (context) => {
   assert.match(consoleHtml, /data-close-dialog="run-dialog"/);
   assert.match(consoleHtml, /id="new-agent-button"/);
   assert.match(consoleHtml, /id="settings-form"/);
-  assert.match(consoleHtml, /初始项目目录/);
+  assert.match(consoleHtml, /默认项目目录（可选）/);
   assert.match(consoleHtml, /Agent 专属空间/);
 
   const consoleCss = await fetch(`${base}/console/styles.css`);
@@ -64,7 +64,7 @@ test("HTTP API creates and returns a run", async (context) => {
   assert.equal(consoleJs.status, 200);
   const consoleScript = await consoleJs.text();
   assert.match(consoleScript, /events\?format=json/);
-  assert.match(consoleScript, /初始项目（只用于创建工作副本）/);
+  assert.match(consoleScript, /默认项目（只用于创建工作副本）/);
   assert.match(consoleScript, /Agent 专属空间（实际工作位置）/);
 
   const brand = await fetch(`${base}/console/hibro-mark.png`);
@@ -108,8 +108,13 @@ test("HTTP API creates and returns a run", async (context) => {
 
   const systemResponse = await fetch(`${base}/v1/system`);
   assert.equal(systemResponse.status, 200);
-  const system = (await systemResponse.json()) as { nodeVersion: string; dataDir: string };
+  const system = (await systemResponse.json()) as {
+    nodeVersion: string;
+    hibroVersion: string;
+    dataDir: string;
+  };
   assert.match(system.nodeVersion, /^v/);
+  assert.equal(system.hibroVersion, "0.2.0");
   assert.equal(system.dataDir, root);
 
   const protocolResponse = await fetch(`${base}/v1/protocol`);
@@ -187,6 +192,41 @@ test("Agent API generates IDs, exposes private paths and reports Core registrati
   );
   assert.notEqual(created.id, "client-supplied-id-is-ignored");
 
+  const clearedResponse = await fetch(`${base}/v1/agents/${created.id}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ source: null }),
+  });
+  assert.equal(clearedResponse.status, 200);
+  const cleared = (await clearedResponse.json()) as { source?: unknown };
+  assert.equal(cleared.source, undefined);
+
+  const restoredResponse = await fetch(`${base}/v1/agents/${created.id}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ source: { type: "local", path: source } }),
+  });
+  assert.equal(restoredResponse.status, 200);
+
+  const attachedRunResponse = await fetch(`${base}/v1/runs`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      agentId: created.id,
+      prompt: "run project",
+      source: { type: "local", path: source },
+    }),
+  });
+  assert.equal(attachedRunResponse.status, 202);
+  const attachedRun = (await attachedRunResponse.json()) as {
+    id: string;
+    workspace: { path: string; strategy: string; sourcePath: string };
+  };
+  assert.equal(attachedRun.workspace.strategy, "per-run");
+  assert.equal(attachedRun.workspace.sourcePath, source);
+  assert.match(attachedRun.workspace.path, new RegExp(`\\.hibro/runs/${attachedRun.id}/workspace$`));
+  await manager.waitForTerminal(attachedRun.id);
+
   const elevatedRun = await fetch(`${base}/v1/runs`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -239,7 +279,15 @@ test("Agent API generates IDs, exposes private paths and reports Core registrati
     new Set(workspaceBody.workspaces.map((value) => value.path)).size,
     workspaceBody.workspaces.length,
   );
-  assert.ok(workspaceBody.workspaces.every((value) => value.sourcePath === source));
+  const createdWorkspace = workspaceBody.workspaces.find(
+    (value) => value.agentId === created.id,
+  );
+  assert.equal(createdWorkspace?.sourcePath, source);
+  assert.ok(
+    workspaceBody.workspaces
+      .filter((value) => value.agentId !== created.id)
+      .every((value) => value.sourcePath === undefined),
+  );
 
   const settingsResponse = await fetch(`${base}/v1/settings`, {
     method: "PUT",

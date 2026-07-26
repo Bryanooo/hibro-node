@@ -33,7 +33,7 @@ export const CONSOLE_HTML = `<!doctype html>
         </nav>
         <div class="sidebar-foot">
           <span id="core-mode">STANDALONE</span>
-          <small>Hibro Node 0.1.0</small>
+          <small id="hibro-version">Hibro Node</small>
         </div>
       </aside>
 
@@ -168,12 +168,12 @@ export const CONSOLE_HTML = `<!doctype html>
 
         <section class="view" id="view-workspaces" data-view-panel="workspaces">
           <div class="info-callout">
-            <span>i</span><div><b>每个 Agent 都在自己的专属空间中工作</b><p>“初始项目”只在首次创建工作副本时使用；Agent 的读取、修改、会话和产出都发生在自己的专属空间中。</p></div>
+            <span>i</span><div><b>每个 Agent 都在自己的专属空间中工作</b><p>Agent 可以从空白空间启动，也可以配置默认项目；还可以只为某次 Run 临时挂载项目。</p></div>
           </div>
           <article class="panel">
             <div class="table-scroller">
               <table>
-                <thead><tr><th>Agent</th><th>初始项目</th><th>空间类型</th><th>Agent 专属空间</th><th>权限</th><th>运行状态</th><th>最近使用</th></tr></thead>
+                <thead><tr><th>Agent</th><th>默认项目</th><th>空间类型</th><th>Agent 专属空间</th><th>权限</th><th>运行状态</th><th>最近使用</th></tr></thead>
                 <tbody id="workspaces-body"></tbody>
               </table>
             </div>
@@ -240,6 +240,7 @@ export const CONSOLE_HTML = `<!doctype html>
           <label><span>Agent</span><select id="run-agent" required></select></label>
           <div class="selection-preview" id="run-agent-preview"></div>
           <label><span>任务指令</span><textarea id="run-prompt" required rows="6" placeholder="说明目标、约束和期望产出。"></textarea></label>
+          <label><span>本次项目目录（可选）</span><input id="run-source-path" placeholder="/workspace/project" /><small>仅为这次 Run 创建独立工作副本，不会改变 Agent 的默认空间。</small></label>
           <div class="field-grid two">
             <label><span>会话键</span><input id="run-session-key" placeholder="default" /></label>
             <label><span>超时</span><select id="run-timeout"><option value="">使用系统默认</option><option value="60000">1 分钟</option><option value="300000">5 分钟</option><option value="900000">15 分钟</option></select></label>
@@ -276,7 +277,7 @@ export const CONSOLE_HTML = `<!doctype html>
             <label><span>引擎</span><select id="agent-engine" required><option value="claude-code">Claude Code</option><option value="codex">Codex CLI</option><option value="openclaw">OpenClaw</option></select></label>
             <label><span>模型（可选）</span><input id="agent-model" placeholder="使用引擎默认模型" /></label>
           </div>
-          <label><span>初始项目目录</span><input id="agent-source-path" required placeholder="/workspace/project" /><small>首次运行时，Hibro 会用这里的文件创建 Agent 专属工作副本。Agent 不会直接在这个目录里工作。</small></label>
+          <label><span>默认项目目录（可选）</span><input id="agent-source-path" placeholder="/workspace/project" /><small>留空时 Agent 从空白专属空间启动；填写后会创建工作副本，不会直接修改此目录。</small></label>
           <div class="field-grid two">
             <label><span>专属空间保留方式</span><select id="agent-workspace-strategy" required><option value="persistent">持续保留，后续继续使用</option><option value="per-run">每次运行创建新空间</option><option value="scratch">每次使用空白临时空间</option></select></label>
             <label><span>专属空间权限</span><select id="agent-workspace-access" required><option value="read-only">只读</option><option value="workspace-write">允许修改</option></select></label>
@@ -1018,7 +1019,7 @@ function filteredAgents() {
   const engine = byId("agent-engine-filter").value;
   return state.agents.filter((runtime) => {
     const agent = runtime.agent;
-    const haystack = [agent.name, agent.id, agent.engine, agent.source.path, runtime.paths?.workspace || "", agent.description || ""].join(" ").toLowerCase();
+    const haystack = [agent.name, agent.id, agent.engine, agent.source?.path || "", runtime.paths?.workspace || "", agent.description || ""].join(" ").toLowerCase();
     return (!query || haystack.includes(query)) && (!engine || agent.engine === engine);
   });
 }
@@ -1041,7 +1042,9 @@ function renderAgents() {
     [engineLabel(agent.engine), workspaceLabel(agent.workspace.strategy), accessLabel(agent.workspace.access), "并发 " + agent.maxConcurrency, agent.model || "默认模型"].forEach((value) => tags.append(el("span", "tag", value)));
     card.append(
       tags,
-      el("code", "agent-path", "初始项目（只用于创建工作副本）  " + agent.source.path),
+      el("code", "agent-path", agent.source?.path
+        ? "默认项目（只用于创建工作副本）  " + agent.source.path
+        : "默认项目  未配置 · 使用空白专属空间"),
       el("code", "agent-path", "Agent 专属空间（实际工作位置）  " + runtime.paths.workspace),
     );
     const coreRow = el("div", "agent-core-row");
@@ -1367,15 +1370,15 @@ function renderWorkspaces() {
     agent.append(el("span", "cell-title", workspace.agentName), el("span", "cell-sub", workspace.agentId));
     const source = document.createElement("td");
     source.append(
-      el("span", "cell-title", workspace.sourcePath),
-      el("span", "cell-sub", "只用于首次创建工作副本"),
+      el("span", "cell-title", workspace.sourcePath || "未配置"),
+      el("span", "cell-sub", workspace.sourcePath ? "只用于创建工作副本" : "默认使用空白专属空间"),
     );
     const mode = document.createElement("td");
     mode.textContent = workspaceLabel(workspace.strategy);
     const path = document.createElement("td");
     path.append(
       el("span", "cell-title", workspace.path),
-      el("span", "cell-sub", "实际工作位置 · 会话数据 " + workspace.statePath),
+      el("span", "cell-sub", "实际工作位置 · 内部数据 " + workspace.metadataPath),
     );
     const permission = document.createElement("td");
     permission.textContent = accessLabel(workspace.access);
@@ -1460,6 +1463,8 @@ function renderSystem() {
   byId("disk-label").textContent = formatBytes(system.disk.freeBytes) + " / " + formatBytes(system.disk.totalBytes);
   byId("disk-progress").style.width = Math.min(100, diskUsed / system.disk.totalBytes * 100) + "%";
   byId("data-directory").textContent = system.dataDir;
+  byId("hibro-version").textContent =
+    "Hibro Node " + (system.hibroVersion || "");
 }
 
 function renderAll() {
@@ -1572,7 +1577,7 @@ function openAgentDialog(agentId) {
     byId("agent-description").value = agent.description || "";
     byId("agent-engine").value = agent.engine;
     byId("agent-model").value = agent.model || "";
-    byId("agent-source-path").value = agent.source.path;
+    byId("agent-source-path").value = agent.source?.path || "";
     byId("agent-workspace-strategy").value = agent.workspace.strategy;
     byId("agent-workspace-access").value = agent.workspace.access;
     byId("agent-concurrency").value = String(agent.maxConcurrency);
@@ -1581,8 +1586,7 @@ function openAgentDialog(agentId) {
     byId("agent-enabled").checked = agent.enabled;
     byId("agent-dangerous").checked = agent.allowDangerousSandbox === true;
   } else {
-    byId("agent-source-path").value =
-      state.agents[0]?.agent.source.path || state.system?.cwd || "";
+    byId("agent-source-path").value = "";
     byId("agent-workspace-strategy").value = "persistent";
     byId("agent-workspace-access").value =
       byId("agent-engine").value === "claude-code" ? "read-only" : "workspace-write";
@@ -1594,18 +1598,20 @@ function openAgentDialog(agentId) {
 function updateAgentWorkspacePreview() {
   const runtime = agentRuntime(state.editingAgentId);
   const strategy = byId("agent-workspace-strategy").value;
-  const statePath = runtime?.paths.state;
-  const root = statePath?.endsWith("/state")
-    ? statePath.slice(0, -6)
+  const workspacePath = runtime?.paths.workspace;
+  const root = workspacePath?.endsWith("/workspace")
+    ? workspacePath.slice(0, -10)
     : (state.system?.dataDir || "~/.hibro-node") + "/agents/<系统生成 ID>";
   const path = strategy === "persistent"
     ? root + "/workspace"
     : strategy === "per-run"
-      ? root + "/runs/<run-id>/workspace"
-      : root + "/runs/<run-id>/scratch";
+      ? root + "/.hibro/runs/<run-id>/workspace"
+      : root + "/.hibro/runs/<run-id>/scratch";
   byId("agent-workspace-preview").textContent =
     "Agent 实际工作位置：" + path + " · " + accessLabel(byId("agent-workspace-access").value) +
-    "。上面的初始项目只用于创建这个工作副本。";
+    (byId("agent-source-path").value.trim()
+      ? "。默认项目只用于创建这个工作副本。"
+      : "。未配置默认项目，将使用空白空间。");
 }
 
 function eventDescription(event) {
@@ -1771,11 +1777,12 @@ function confirmAction(title, copy, callback) {
 
 async function saveAgent(event) {
   event.preventDefault();
+  const sourcePath = byId("agent-source-path").value.trim();
   const body = {
     name: byId("agent-name").value.trim(),
     description: byId("agent-description").value.trim() || undefined,
     engine: byId("agent-engine").value,
-    source: { type: "local", path: byId("agent-source-path").value.trim() },
+    source: sourcePath ? { type: "local", path: sourcePath } : null,
     workspace: {
       strategy: byId("agent-workspace-strategy").value,
       access: byId("agent-workspace-access").value,
@@ -1815,6 +1822,7 @@ async function submitRun(event) {
   const timeout = byId("run-timeout").value;
   const sandbox = byId("run-sandbox").value;
   const options = {};
+  const sourcePath = byId("run-source-path").value.trim();
   if (timeout) options.timeoutMs = Number(timeout);
   if (sandbox) options.sandbox = sandbox;
   try {
@@ -1824,6 +1832,7 @@ async function submitRun(event) {
       body: JSON.stringify({
         agentId: byId("run-agent").value,
         prompt: byId("run-prompt").value.trim(),
+        source: sourcePath ? { type: "local", path: sourcePath } : undefined,
         sessionKey: byId("run-session-key").value.trim() || undefined,
         freshSession: byId("run-fresh-session").checked,
         options,
@@ -1913,6 +1922,7 @@ byId("banner-action").addEventListener("click", () => setView("engines"));
 byId("run-agent").addEventListener("change", updateRunPreview);
 byId("agent-workspace-strategy").addEventListener("change", updateAgentWorkspacePreview);
 byId("agent-workspace-access").addEventListener("change", updateAgentWorkspacePreview);
+byId("agent-source-path").addEventListener("input", updateAgentWorkspacePreview);
 byId("agent-engine").addEventListener("change", () => {
   if (!state.editingAgentId) {
     byId("agent-workspace-access").value =

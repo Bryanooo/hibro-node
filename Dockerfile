@@ -19,7 +19,7 @@ RUN npm ci --omit=dev
 
 COPY src ./src
 COPY assets ./assets
-COPY README.md ./
+COPY README.md VERSION ./
 COPY docker-entrypoint.sh /usr/local/bin/hibro-entrypoint
 
 RUN chmod +x /usr/local/bin/hibro-entrypoint \

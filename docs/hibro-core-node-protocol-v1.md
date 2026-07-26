@@ -170,6 +170,18 @@ Conflict rules:
 - Core cannot directly set a filesystem path outside policy approved by Node.
 - Team membership is never stored as an execution concern inside Node.
 
+An Agent definition may contain an optional local `source`:
+
+```json
+{
+  "source": { "type": "local", "path": "/workspace/project" }
+}
+```
+
+This is only the Agent's default project. Its absence means the Agent starts in an empty,
+private workspace; it does not make the Agent invalid or unavailable. Core stores this field as
+opaque Node-local configuration and must not assume it can access the path.
+
 ## 7. Run lifecycle
 
 ```mermaid
@@ -192,11 +204,17 @@ Core sends a durable, acknowledged command containing:
 - `commandId`;
 - requester identity and source;
 - target local `agentId`;
-- ordinary `CreateRunInput`;
+- ordinary `CreateRunInput`, including an optional Run-level local `source`;
 - optional deadline.
 
 Core must set an `idempotencyKey`. Node stores the command before starting the engine. Repeated
 delivery returns the original `run.accepted` payload.
+
+A Run-level `source` overrides the Agent default for that Run. Node materializes it into an
+ephemeral private workspace and removes that workspace after the Run. When neither the Run nor
+the Agent defines a source, Node executes in the Agent's empty private workspace. A remote Core
+may only send a local path that the Node operator has exposed and approved; v1 does not grant
+Core arbitrary filesystem access.
 
 ### `run.accepted`
 

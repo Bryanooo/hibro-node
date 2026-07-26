@@ -33,6 +33,7 @@ test("agent registry seeds isolated Claude and Codex agents and generates IDs", 
     ),
   );
   assert.ok(defaults.every((agent) => agent.workspace.strategy === "persistent"));
+  assert.ok(defaults.every((agent) => agent.source === undefined));
 
   const created = await registry.create({
     name: "Reviewer",
@@ -85,7 +86,7 @@ test("agent registry migrates legacy workspace fields without changing IDs", asy
   const codex = registry.get("codex-local");
   assert.deepEqual(claude?.workspace, { strategy: "persistent", access: "read-only" });
   assert.deepEqual(codex?.workspace, { strategy: "per-run", access: "workspace-write" });
-  assert.equal(claude?.source.path, process.cwd());
+  assert.equal(claude?.source?.path, process.cwd());
   const persisted = await readFile(path, "utf8");
   assert.doesNotMatch(persisted, /projectRoot|workspaceMode/);
 });
@@ -252,7 +253,7 @@ test("Git workspaces keep source metadata read-only and manage worktrees in Agen
   assert.equal(concurrentLease.materialization, "git-worktree");
   assert.equal(
     lease.gitRepositoryPath,
-    join(workspaceRoot, agent.id, "state", "source.git"),
+    join(workspaceRoot, agent.id, ".hibro", "state", "source.git"),
   );
   await access(join(lease.path, "README.md"));
   await access(join(concurrentLease.path, "README.md"));
@@ -265,4 +266,46 @@ test("Git workspaces keep source metadata read-only and manage worktrees in Agen
     assert.rejects(() => access(lease.path)),
     assert.rejects(() => access(concurrentLease.path)),
   ]);
+});
+
+test("an Agent without a project starts empty and can attach a project per Run", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hibro-empty-agent-"));
+  const source = join(root, "project");
+  await mkdir(source);
+  await writeFile(join(source, "brief.md"), "attached project\n", "utf8");
+  const manager = new WorkspaceManager(join(root, "agents"));
+  const now = new Date().toISOString();
+  const agent = {
+    id: "general-agent",
+    name: "General Agent",
+    engine: "codex" as const,
+    enabled: true,
+    workspace: { strategy: "persistent" as const, access: "workspace-write" as const },
+    maxConcurrency: 1,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  const empty = await manager.acquire(agent, "empty-run");
+  assert.equal(empty.materialization, "empty");
+  assert.equal(empty.sourcePath, undefined);
+  assert.equal(empty.path, join(root, "agents", agent.id, "workspace"));
+  assert.equal(empty.statePath, join(root, "agents", agent.id, ".hibro", "state"));
+  await manager.release(agent.id, "empty-run", empty);
+
+  const attached = await manager.acquire(
+    agent,
+    "attached-run",
+    { type: "local", path: source },
+  );
+  assert.equal(attached.strategy, "per-run");
+  assert.equal(attached.sourcePath, source);
+  assert.equal(
+    attached.path,
+    join(root, "agents", agent.id, ".hibro", "runs", "attached-run", "workspace"),
+  );
+  await access(join(attached.path, "brief.md"));
+  await manager.release(agent.id, "attached-run", attached);
+  await assert.rejects(() => access(attached.path));
+  await access(empty.path);
 });

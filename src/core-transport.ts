@@ -1,5 +1,6 @@
 import { createReadStream } from "node:fs";
 import { arch, platform } from "node:os";
+import { resolve } from "node:path";
 import WebSocket from "ws";
 import {
   createCoreEnvelope,
@@ -12,6 +13,7 @@ import type { ConversationService } from "./conversation-service.ts";
 import type { ConversationEvent } from "./conversation-domain.ts";
 import type { ArtifactRecord } from "./domain.ts";
 import { createId } from "./identity.ts";
+import { hibroNodeVersion } from "./version.ts";
 
 export class CoreTransport {
   private readonly manager: RunManager;
@@ -348,7 +350,7 @@ export class CoreTransport {
         nodeId: settings.nodeId,
         nodeName: settings.nodeName,
         instanceId: this.instanceId,
-        version: "0.1.0",
+        version: hibroNodeVersion(),
         startedAt: new Date(Date.now() - process.uptime() * 1_000).toISOString(),
         platform: platform(),
         arch: arch(),
@@ -444,6 +446,22 @@ export class CoreTransport {
     const existing = (await this.manager.list()).find(
       (run) => run.request.metadata?.coreCommandId === payload.commandId,
     );
+    const requestedSource = payload.request.source as
+      | { type?: unknown; path?: unknown }
+      | undefined;
+    if (requestedSource) {
+      const agentSource = this.manager.getAgent(payload.agentId)?.source;
+      if (
+        requestedSource.type !== "local" ||
+        typeof requestedSource.path !== "string" ||
+        !agentSource ||
+        resolve(requestedSource.path) !== resolve(agentSource.path)
+      ) {
+        throw new Error(
+          "Core may only attach the local project already approved in the Agent configuration",
+        );
+      }
+    }
     const run =
       existing ??
       (await this.manager.create({

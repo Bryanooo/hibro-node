@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { CONSOLE_CSS, CONSOLE_HTML, CONSOLE_JS } from "./console-assets.ts";
 import { CORE_MESSAGE_TYPES, HIBRO_CORE_PROTOCOL } from "./core-protocol.ts";
 import type { ConversationService } from "./conversation-service.ts";
+import { hibroNodeVersion } from "./version.ts";
 
 export interface HttpServerOptions {
   host: string;
@@ -166,6 +167,7 @@ export function createHibroHttpServer(options: HttpServerOptions): Server {
           hostname: hostname(),
           uptimeSeconds: process.uptime(),
           nodeVersion: process.version,
+          hibroVersion: hibroNodeVersion(),
           cwd: process.cwd(),
         });
         return;
@@ -245,13 +247,14 @@ export function createHibroHttpServer(options: HttpServerOptions): Server {
         return;
       }
       if (request.method === "GET" && url.pathname === "/v1/system") {
-        const disk = await statfs(manager.store.rootDir);
+        const disk = await statfs(manager.dataDir);
         sendJson(response, 200, {
           hostname: hostname(),
           platform: platform(),
           arch: arch(),
           release: release(),
           nodeVersion: process.version,
+          hibroVersion: hibroNodeVersion(),
           pid: process.pid,
           uptimeSeconds: process.uptime(),
           memory: { totalBytes: totalmem(), freeBytes: freemem() },
@@ -259,7 +262,7 @@ export function createHibroHttpServer(options: HttpServerOptions): Server {
             totalBytes: disk.blocks * disk.bsize,
             freeBytes: disk.bavail * disk.bsize,
           },
-          dataDir: manager.store.rootDir,
+          dataDir: manager.dataDir,
           cwd: process.cwd(),
           activeRuns: manager.activeRunCount(),
           container: process.env.HIBRO_CONTAINER === "docker",
@@ -352,15 +355,15 @@ export function createHibroHttpServer(options: HttpServerOptions): Server {
           return;
         }
         const body = (await readJsonBody(request)) as Partial<AgentDefinition>;
-        if (!body.name || !body.engine || !body.source || !body.workspace) {
-          throw new Error("name, engine, source and workspace are required");
+        if (!body.name || !body.engine || !body.workspace) {
+          throw new Error("name, engine and workspace are required");
         }
         const agent = await manager.agents.create({
           name: body.name,
           description: body.description,
           engine: body.engine,
           enabled: body.enabled ?? true,
-          source: body.source,
+          ...(body.source ? { source: body.source } : {}),
           workspace: body.workspace,
           maxConcurrency: body.maxConcurrency ?? 1,
           model: body.model,
@@ -386,10 +389,12 @@ export function createHibroHttpServer(options: HttpServerOptions): Server {
         const existing = manager.getAgent(agentMatch[1] as string);
         const name = body.name ?? existing?.name;
         const engine = body.engine ?? existing?.engine;
-        const source = body.source ?? existing?.source;
+        const source = Object.prototype.hasOwnProperty.call(body, "source")
+          ? body.source
+          : existing?.source;
         const workspace = body.workspace ?? existing?.workspace;
-        if (!name || !engine || !source || !workspace) {
-          throw new Error("name, engine, source and workspace are required");
+        if (!name || !engine || !workspace) {
+          throw new Error("name, engine and workspace are required");
         }
         const agent = await manager.agents.upsert({
           ...existing,
@@ -397,7 +402,7 @@ export function createHibroHttpServer(options: HttpServerOptions): Server {
           id: agentMatch[1] as string,
           name,
           engine,
-          source,
+          ...(source ? { source } : { source: undefined }),
           workspace,
         });
         sendJson(response, 200, agent);

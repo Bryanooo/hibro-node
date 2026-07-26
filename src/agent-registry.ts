@@ -54,12 +54,10 @@ function migrateWorkspace(mode?: WorkspaceMode): AgentWorkspaceConfig {
 
 export class FileAgentRegistry {
   private readonly path: string;
-  private readonly defaultProjectRoot: string;
   private agents = new Map<string, AgentDefinition>();
 
-  constructor(path: string, defaultProjectRoot = process.cwd()) {
+  constructor(path: string, _legacyDefaultProjectRoot = process.cwd()) {
     this.path = path;
-    this.defaultProjectRoot = resolve(defaultProjectRoot);
   }
 
   async init(): Promise<void> {
@@ -101,13 +99,16 @@ export class FileAgentRegistry {
 
   async upsert(
     input: Partial<AgentDefinition> &
-      Pick<AgentDefinition, "id" | "name" | "engine" | "source" | "workspace">,
+      Pick<AgentDefinition, "id" | "name" | "engine" | "workspace">,
   ): Promise<AgentDefinition> {
     validateId(input.id);
     if (!input.name.trim()) throw new Error("agent name is required");
     if (!ENGINE_TYPES.includes(input.engine)) throw new Error(`unsupported engine: ${input.engine}`);
-    if (input.source.type !== "local" || !input.source.path.trim()) {
-      throw new Error("a local source path is required");
+    if (
+      input.source &&
+      (input.source.type !== "local" || !input.source.path.trim())
+    ) {
+      throw new Error("source path must be a non-empty local path");
     }
     if (!WORKSPACE_STRATEGIES.includes(input.workspace.strategy)) {
       throw new Error(`unsupported workspace strategy: ${input.workspace.strategy}`);
@@ -123,7 +124,9 @@ export class FileAgentRegistry {
       description: input.description?.trim() || undefined,
       engine: input.engine,
       enabled: input.enabled ?? true,
-      source: { type: "local", path: resolve(input.source.path) },
+      ...(input.source
+        ? { source: { type: "local" as const, path: resolve(input.source.path) } }
+        : {}),
       workspace: { ...input.workspace },
       maxConcurrency: input.maxConcurrency ?? 1,
       model: input.model?.trim() || undefined,
@@ -151,14 +154,16 @@ export class FileAgentRegistry {
   private normalize(value: LegacyAgentDefinition): AgentDefinition {
     const now = new Date().toISOString();
     const id = value.id ?? createAgentId();
-    const sourcePath = value.source?.path ?? value.projectRoot ?? this.defaultProjectRoot;
+    const sourcePath = value.source?.path ?? value.projectRoot;
     return this.validateNormalized({
       id,
       name: value.name ?? "Unnamed Agent",
       description: value.description,
       engine: value.engine ?? "claude-code",
       enabled: value.enabled ?? true,
-      source: { type: "local", path: resolve(sourcePath) },
+      ...(sourcePath
+        ? { source: { type: "local" as const, path: resolve(sourcePath) } }
+        : {}),
       workspace: value.workspace ?? migrateWorkspace(value.workspaceMode),
       maxConcurrency: value.maxConcurrency ?? 1,
       model: value.model,
@@ -260,7 +265,6 @@ export class FileAgentRegistry {
       engine,
       description: variant.description,
       enabled: true,
-      source: { type: "local", path: this.defaultProjectRoot },
       workspace: { strategy: "persistent", access: variant.access },
       maxConcurrency: 1,
       allowedTools: variant.allowedTools,

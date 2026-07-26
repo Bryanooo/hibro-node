@@ -33,6 +33,7 @@ import { createId } from "./identity.ts";
 
 export interface RunManagerOptions {
   store: RunStore;
+  dataDir?: string | undefined;
   adapter?: AgentEngineAdapter | undefined;
   adapters?: AgentEngineAdapter[] | undefined;
   agents?: FileAgentRegistry | undefined;
@@ -47,6 +48,7 @@ interface DoctorCache {
 
 export class RunManager {
   readonly store: RunStore;
+  readonly dataDir: string;
   readonly adapter: AgentEngineAdapter;
   readonly agents: FileAgentRegistry | undefined;
   readonly workspaces: WorkspaceManager;
@@ -81,6 +83,7 @@ export class RunManager {
 
   constructor(options: RunManagerOptions) {
     this.store = options.store;
+    this.dataDir = resolve(options.dataDir ?? options.store.rootDir);
     const claude: AgentEngineAdapter =
       options.adapter ??
       options.adapters?.find((candidate) => candidate.engineType === "claude-code") ??
@@ -108,7 +111,10 @@ export class RunManager {
         run.request.sessionKey?.trim() &&
         run.status === "completed"
       ) {
-        this.sessions.set(this.sessionKey(run.agentId, run.request.sessionKey), run.sessionId);
+        this.sessions.set(
+          this.sessionKey(run.agentId, run.request.sessionKey, run.request.source?.path),
+          run.sessionId,
+        );
       }
     }
   }
@@ -124,7 +130,15 @@ export class RunManager {
     const runId = createId("run");
     let lease: RunRecord["workspace"];
     try {
-      lease = await this.workspaces.acquire(agent, runId);
+      const source =
+        input.source ??
+        (input.workspace
+          ? { type: "local" as const, path: resolve(input.workspace) }
+          : undefined);
+      const normalizedSource = source
+        ? { type: "local" as const, path: resolve(source.path) }
+        : undefined;
+      lease = await this.workspaces.acquire(agent, runId, normalizedSource);
       const artifactPath = join(this.workspaces.pathsFor(agent.id).artifacts, runId);
       await mkdir(artifactPath, { recursive: true, mode: 0o700 });
       lease.artifactPath = artifactPath;
@@ -135,7 +149,9 @@ export class RunManager {
         (!input.sessionKey?.trim() && !input.options?.sessionId)
           ? undefined
           : input.options?.sessionId ??
-            this.sessions.get(this.sessionKey(agent.id, input.sessionKey));
+            this.sessions.get(
+              this.sessionKey(agent.id, input.sessionKey, normalizedSource?.path),
+            );
       const options = this.effectiveRunOptions(input, agent, settings, lease, artifactPath, sessionId);
       const run: RunRecord = {
         id: runId,
@@ -145,6 +161,7 @@ export class RunManager {
         request: {
           ...input,
           agentId: agent.id,
+          ...(normalizedSource ? { source: normalizedSource } : {}),
           workspace: lease.path,
           options,
         },
@@ -332,7 +349,8 @@ export class RunManager {
       strategy: AgentDefinition["workspace"]["strategy"];
       access: AgentDefinition["workspace"]["access"];
       path: string;
-      sourcePath: string;
+      sourcePath?: string | undefined;
+      metadataPath: string;
       statePath: string;
       tempPath: string;
       artifactsPath: string;
@@ -352,7 +370,8 @@ export class RunManager {
         strategy: agent.workspace.strategy,
         access: agent.workspace.access,
         path: this.workspaces.expectedWorkspacePath(agent),
-        sourcePath: agent.source.path,
+        sourcePath: agent.source?.path,
+        metadataPath: paths.metadata,
         statePath: paths.state,
         tempPath: paths.temp,
         artifactsPath: paths.artifacts,
@@ -434,6 +453,7 @@ export class RunManager {
           : { status: "standalone" as const },
         paths: {
           workspace: this.workspaces.expectedWorkspacePath(agent),
+          metadata: paths.metadata,
           state: paths.state,
           temp: paths.temp,
           artifacts: paths.artifacts,
@@ -603,7 +623,10 @@ export class RunManager {
       await eventWrites;
       this.applySuccess(run, result);
       if (run.sessionId && run.agentId && run.request.sessionKey?.trim()) {
-        this.sessions.set(this.sessionKey(run.agentId, run.request.sessionKey), run.sessionId);
+        this.sessions.set(
+          this.sessionKey(run.agentId, run.request.sessionKey, run.request.source?.path),
+          run.sessionId,
+        );
       }
       await this.persist(run);
       await this.emit(run.id, "run.completed", {
@@ -771,6 +794,12 @@ export class RunManager {
       throw new Error("workspace is required");
     }
     if (
+      input.source &&
+      (input.source.type !== "local" || !input.source.path.trim())
+    ) {
+      throw new Error("source path must be a non-empty local path");
+    }
+    if (
       input.options?.timeoutMs !== undefined &&
       (!Number.isFinite(input.options.timeoutMs) || input.options.timeoutMs <= 0)
     ) {
@@ -800,9 +829,14 @@ export class RunManager {
     };
   }
 
-  private sessionKey(agentId: string, sessionKey?: string): string {
+  private sessionKey(
+    agentId: string,
+    sessionKey?: string,
+    sourcePath?: string,
+  ): string {
     if (!sessionKey?.trim()) throw new Error("sessionKey is required to resume a session");
-    return `${agentId}:${sessionKey.trim()}`;
+    const workspaceScope = sourcePath ? resolve(sourcePath) : "agent-home";
+    return `${agentId}:${workspaceScope}:${sessionKey.trim()}`;
   }
 
   private reserveRunSlot(agent: AgentDefinition, globalLimit: number): void {

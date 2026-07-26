@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -123,6 +123,41 @@ test("direct runs do not share an implicit Agent session", async () => {
   });
   await instance.waitForTerminal(second.id);
   assert.deepEqual(observedSessions, [undefined, undefined]);
+});
+
+test("the same session key stays isolated between Run-level projects", async () => {
+  const observedSessions: Array<string | undefined> = [];
+  class SessionAdapter implements AgentEngineAdapter {
+    readonly engineType = "claude-code" as const;
+    async doctor() {
+      return { installed: true, ready: true };
+    }
+    async execute(input: EngineExecuteInput) {
+      observedSessions.push(input.options?.sessionId);
+      return {
+        sessionId: `session-${observedSessions.length}`,
+        result: "ok",
+      };
+    }
+  }
+  const root = await mkdtemp(join(tmpdir(), "hibro-project-session-"));
+  const projectA = join(root, "project-a");
+  const projectB = join(root, "project-b");
+  await Promise.all([mkdir(projectA), mkdir(projectB)]);
+  const instance = new RunManager({
+    adapter: new SessionAdapter(),
+    store: new FileRunStore(join(root, "store")),
+  });
+  await instance.init();
+  for (const project of [projectA, projectB, projectA]) {
+    const run = await instance.create({
+      prompt: "continue",
+      workspace: project,
+      sessionKey: "same-name",
+    });
+    await instance.waitForTerminal(run.id);
+  }
+  assert.deepEqual(observedSessions, [undefined, undefined, "session-1"]);
 });
 
 test("recovers an interrupted run after node restart", async () => {

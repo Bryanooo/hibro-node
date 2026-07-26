@@ -1,0 +1,305 @@
+import { randomBytes } from "node:crypto";
+import { mkdir, readFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+import {
+  ENGINE_TYPES,
+  WORKSPACE_ACCESS_MODES,
+  WORKSPACE_STRATEGIES,
+  type AgentDefinition,
+  type AgentWorkspaceConfig,
+  type EngineType,
+  type WorkspaceMode,
+} from "./domain.ts";
+import { writeJsonAtomically } from "./storage.ts";
+
+const CROCKFORD_BASE32 = "0123456789abcdefghjkmnpqrstvwxyz";
+
+type CreateAgentInput = Omit<AgentDefinition, "id" | "createdAt" | "updatedAt">;
+
+interface LegacyAgentDefinition {
+  id?: string;
+  name?: string;
+  description?: string;
+  engine?: EngineType;
+  enabled?: boolean;
+  projectRoot?: string;
+  workspaceMode?: WorkspaceMode;
+  source?: AgentDefinition["source"];
+  workspace?: AgentDefinition["workspace"];
+  maxConcurrency?: number;
+  model?: string;
+  instructions?: string;
+  allowedTools?: string[];
+  allowDangerousSandbox?: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+function validateId(id: string): void {
+  if (!/^[a-z0-9][a-z0-9._-]{1,63}$/i.test(id)) {
+    throw new Error("agent id must contain 2-64 letters, numbers, dots, dashes or underscores");
+  }
+}
+
+function encodeTime(timestamp: number): string {
+  let value = timestamp;
+  let encoded = "";
+  for (let index = 0; index < 10; index += 1) {
+    encoded = CROCKFORD_BASE32[value % 32] + encoded;
+    value = Math.floor(value / 32);
+  }
+  return encoded;
+}
+
+function encodeRandom(): string {
+  const bytes = randomBytes(10);
+  let bits = 0;
+  let bitCount = 0;
+  let encoded = "";
+  for (const byte of bytes) {
+    bits = (bits << 8) | byte;
+    bitCount += 8;
+    while (bitCount >= 5) {
+      bitCount -= 5;
+      encoded += CROCKFORD_BASE32[(bits >>> bitCount) & 31];
+    }
+    bits &= bitCount === 0 ? 0 : (1 << bitCount) - 1;
+  }
+  return encoded;
+}
+
+export function createAgentId(now = Date.now()): string {
+  return `agt_${encodeTime(now)}${encodeRandom()}`;
+}
+
+function migrateWorkspace(mode?: WorkspaceMode): AgentWorkspaceConfig {
+  if (mode === "shared-readonly") return { strategy: "persistent", access: "read-only" };
+  if (mode === "ephemeral-worktree") {
+    return { strategy: "per-run", access: "workspace-write" };
+  }
+  if (mode === "scratch") return { strategy: "scratch", access: "workspace-write" };
+  return { strategy: "persistent", access: "workspace-write" };
+}
+
+export class FileAgentRegistry {
+  private readonly path: string;
+  private readonly defaultProjectRoot: string;
+  private agents = new Map<string, AgentDefinition>();
+
+  constructor(path: string, defaultProjectRoot = process.cwd()) {
+    this.path = path;
+    this.defaultProjectRoot = resolve(defaultProjectRoot);
+  }
+
+  async init(): Promise<void> {
+    await mkdir(dirname(this.path), { recursive: true });
+    try {
+      const values = JSON.parse(await readFile(this.path, "utf8")) as LegacyAgentDefinition[];
+      this.agents = new Map(
+        values.map((value) => {
+          const agent = this.normalize(value);
+          return [agent.id, agent];
+        }),
+      );
+      this.ensureMinimumAgents();
+      await this.persist();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      for (const agent of this.defaultAgents()) this.agents.set(agent.id, agent);
+      await this.persist();
+    }
+  }
+
+  list(): AgentDefinition[] {
+    return [...this.agents.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  get(id: string): AgentDefinition | undefined {
+    return this.agents.get(id);
+  }
+
+  default(): AgentDefinition | undefined {
+    return this.list().find((agent) => agent.enabled);
+  }
+
+  async create(input: CreateAgentInput): Promise<AgentDefinition> {
+    let id = createAgentId();
+    while (this.agents.has(id)) id = createAgentId();
+    return this.upsert({ ...input, id });
+  }
+
+  async upsert(
+    input: Partial<AgentDefinition> &
+      Pick<AgentDefinition, "id" | "name" | "engine" | "source" | "workspace">,
+  ): Promise<AgentDefinition> {
+    validateId(input.id);
+    if (!input.name.trim()) throw new Error("agent name is required");
+    if (!ENGINE_TYPES.includes(input.engine)) throw new Error(`unsupported engine: ${input.engine}`);
+    if (input.source.type !== "local" || !input.source.path.trim()) {
+      throw new Error("a local source path is required");
+    }
+    if (!WORKSPACE_STRATEGIES.includes(input.workspace.strategy)) {
+      throw new Error(`unsupported workspace strategy: ${input.workspace.strategy}`);
+    }
+    if (!WORKSPACE_ACCESS_MODES.includes(input.workspace.access)) {
+      throw new Error(`unsupported workspace access: ${input.workspace.access}`);
+    }
+    const now = new Date().toISOString();
+    const previous = this.agents.get(input.id);
+    const agent: AgentDefinition = {
+      id: input.id,
+      name: input.name.trim(),
+      description: input.description?.trim() || undefined,
+      engine: input.engine,
+      enabled: input.enabled ?? true,
+      source: { type: "local", path: resolve(input.source.path) },
+      workspace: { ...input.workspace },
+      maxConcurrency: input.maxConcurrency ?? 1,
+      model: input.model?.trim() || undefined,
+      instructions: input.instructions?.trim() || undefined,
+      allowedTools: input.allowedTools,
+      allowDangerousSandbox: input.allowDangerousSandbox ?? false,
+      createdAt: previous?.createdAt ?? now,
+      updatedAt: now,
+    };
+    if (!Number.isInteger(agent.maxConcurrency) || agent.maxConcurrency < 1) {
+      throw new Error("maxConcurrency must be a positive integer");
+    }
+    this.agents.set(agent.id, agent);
+    await this.persist();
+    return agent;
+  }
+
+  async delete(id: string): Promise<boolean> {
+    validateId(id);
+    const deleted = this.agents.delete(id);
+    if (deleted) await this.persist();
+    return deleted;
+  }
+
+  private normalize(value: LegacyAgentDefinition): AgentDefinition {
+    const now = new Date().toISOString();
+    const id = value.id ?? createAgentId();
+    const sourcePath = value.source?.path ?? value.projectRoot ?? this.defaultProjectRoot;
+    return this.validateNormalized({
+      id,
+      name: value.name ?? "Unnamed Agent",
+      description: value.description,
+      engine: value.engine ?? "claude-code",
+      enabled: value.enabled ?? true,
+      source: { type: "local", path: resolve(sourcePath) },
+      workspace: value.workspace ?? migrateWorkspace(value.workspaceMode),
+      maxConcurrency: value.maxConcurrency ?? 1,
+      model: value.model,
+      instructions: value.instructions,
+      allowedTools: value.allowedTools,
+      allowDangerousSandbox: value.allowDangerousSandbox ?? false,
+      createdAt: value.createdAt ?? now,
+      updatedAt: value.updatedAt ?? now,
+    });
+  }
+
+  private validateNormalized(agent: AgentDefinition): AgentDefinition {
+    validateId(agent.id);
+    if (!ENGINE_TYPES.includes(agent.engine)) throw new Error(`unsupported engine: ${agent.engine}`);
+    if (!WORKSPACE_STRATEGIES.includes(agent.workspace.strategy)) {
+      throw new Error(`unsupported workspace strategy: ${agent.workspace.strategy}`);
+    }
+    if (!WORKSPACE_ACCESS_MODES.includes(agent.workspace.access)) {
+      throw new Error(`unsupported workspace access: ${agent.workspace.access}`);
+    }
+    if (!Number.isInteger(agent.maxConcurrency) || agent.maxConcurrency < 1) {
+      throw new Error("maxConcurrency must be a positive integer");
+    }
+    return agent;
+  }
+
+  private defaultAgents(): AgentDefinition[] {
+    return ENGINE_TYPES.flatMap((engine) => [
+      this.createDefaultAgent(engine, 0),
+      this.createDefaultAgent(engine, 1),
+    ]);
+  }
+
+  private ensureMinimumAgents(): void {
+    for (const engine of ENGINE_TYPES) {
+      let count = this.list().filter((agent) => agent.engine === engine).length;
+      while (count < 2) {
+        const agent = this.createDefaultAgent(engine, count);
+        this.agents.set(agent.id, agent);
+        count += 1;
+      }
+    }
+  }
+
+  private createDefaultAgent(engine: EngineType, index: number): AgentDefinition {
+    const now = new Date().toISOString();
+    const variants: Record<
+      EngineType,
+      Array<{
+        name: string;
+        description: string;
+        access: AgentWorkspaceConfig["access"];
+        allowedTools?: string[] | undefined;
+      }>
+    > = {
+      "claude-code": [
+        {
+          name: "Claude 分析助手",
+          description: "适合分析、检索和长文本推理",
+          access: "read-only",
+          allowedTools: ["Read", "Grep", "Glob"],
+        },
+        {
+          name: "Claude 实作助手",
+          description: "适合在独立工作区中修改代码和验证方案",
+          access: "workspace-write",
+          allowedTools: ["Read", "Grep", "Glob", "Write", "Edit", "Bash"],
+        },
+      ],
+      codex: [
+        {
+          name: "Codex 开发助手",
+          description: "适合实现功能、运行测试和修复问题",
+          access: "workspace-write",
+        },
+        {
+          name: "Codex 审查助手",
+          description: "适合代码审查、重构和独立方案验证",
+          access: "workspace-write",
+        },
+      ],
+      openclaw: [
+        {
+          name: "OpenClaw 研究助手",
+          description: "适合使用 OpenClaw 完成研究、归纳与协作任务",
+          access: "read-only",
+        },
+        {
+          name: "OpenClaw 自动化助手",
+          description: "适合在受控工作区中执行多步骤自动化任务",
+          access: "workspace-write",
+        },
+      ],
+    };
+    const variant = variants[engine][index] ?? variants[engine][0]!;
+    return {
+      id: createAgentId(),
+      name: variant.name,
+      engine,
+      description: variant.description,
+      enabled: true,
+      source: { type: "local", path: this.defaultProjectRoot },
+      workspace: { strategy: "persistent", access: variant.access },
+      maxConcurrency: 1,
+      allowedTools: variant.allowedTools,
+      allowDangerousSandbox: false,
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  private async persist(): Promise<void> {
+    await writeJsonAtomically(this.path, this.list());
+  }
+}

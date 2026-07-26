@@ -1,0 +1,34 @@
+services:
+  hibro-node:
+    build:
+      context: .
+      args:
+        CLAUDE_CODE_VERSION: "2.1.218"
+        CODEX_VERSION: "0.145.0"
+        OPENCLAW_VERSION: "2026.7.1-2"
+    image: hibro-node:local
+    container_name: hibro-node-local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${HIBRO_DOCKER_PORT:-17332}:7331"
+    environment:
+      HIBRO_NODE_HOST: 0.0.0.0
+      HIBRO_NODE_PORT: 7331
+      HIBRO_NODE_DATA_DIR: /data
+      HIBRO_DEFAULT_PROJECT_ROOT: /workspace/project
+      HIBRO_IMPORT_SHELL_ENV: "false"
+      HIBRO_CONTAINER: docker
+      HIBRO_NODE_CONTROL_TOKEN: "${HIBRO_NODE_CONTROL_TOKEN:-}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      ANTHROPIC_AUTH_TOKEN: "${ANTHROPIC_AUTH_TOKEN:-}"
+      ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-}"
+      ANTHROPIC_MODEL: "${ANTHROPIC_MODEL:-}"
+    volumes:
+      - hibro-node-data:/data
+      - .:/workspace/project:ro
+      - "${HOME}/.codex/auth.json:/run/host-codex/auth.json:ro"
+      - "${HOME}/.codex/config.toml:/run/host-codex/config.toml:ro"
+
+volumes:
+  hibro-node-data:
+    name: hibro-node-data

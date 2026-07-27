@@ -68,9 +68,9 @@ test("approval waiting time does not consume the Codex execution timeout", async
   const result = await new CodexAdapter({ executable }).execute({
     prompt: "APPROVAL",
     workspace: process.cwd(),
-    options: { timeoutMs: 40 },
+    options: { timeoutMs: 500 },
     requestApproval: async () => {
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 80));
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 650));
       return "allow_once";
     },
   });

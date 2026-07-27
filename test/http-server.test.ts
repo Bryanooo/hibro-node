@@ -112,7 +112,7 @@ test("HTTP API creates and returns a run", async (context) => {
     dataDir: string;
   };
   assert.match(system.nodeVersion, /^v/);
-  assert.equal(system.hibroVersion, "0.2.0");
+  assert.equal(system.hibroVersion, "0.2.1");
   assert.equal(system.dataDir, root);
 
   const protocolResponse = await fetch(`${base}/v1/protocol`);

@@ -34,6 +34,7 @@ test("agent registry seeds isolated Claude and Codex agents and generates IDs", 
   );
   assert.ok(defaults.every((agent) => agent.workspace.strategy === "persistent"));
   assert.ok(defaults.every((agent) => agent.source === undefined));
+  assert.ok(defaults.every((agent) => agent.approvalPolicy === "workspace"));
 
   const created = await registry.create({
     name: "Reviewer",
@@ -47,6 +48,7 @@ test("agent registry seeds isolated Claude and Codex agents and generates IDs", 
     created.id,
     /^agt_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
   );
+  assert.equal(created.approvalPolicy, "workspace");
   const persisted = JSON.parse(await readFile(path, "utf8")) as Array<{ id: string }>;
   assert.ok(persisted.some((agent) => agent.id === created.id));
   assert.equal(await registry.delete(created.id), true);
@@ -87,6 +89,8 @@ test("agent registry migrates legacy workspace fields without changing IDs", asy
   assert.deepEqual(claude?.workspace, { strategy: "persistent", access: "read-only" });
   assert.deepEqual(codex?.workspace, { strategy: "per-run", access: "workspace-write" });
   assert.equal(claude?.source?.path, process.cwd());
+  assert.equal(claude?.approvalPolicy, "workspace");
+  assert.equal(codex?.approvalPolicy, "workspace");
   const persisted = await readFile(path, "utf8");
   assert.doesNotMatch(persisted, /projectRoot|workspaceMode/);
 });

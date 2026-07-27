@@ -6,5 +6,8 @@ node_modules/
 dist/
 .hibro-node/
 coverage/
+test-results/
+playwright-report/
+blob-report/
 *.log
 .DS_Store

@@ -86,12 +86,10 @@ test("HTTP API creates and returns a run", async (context) => {
   const artifacts = (await artifactsResponse.json()) as {
     artifacts: Array<{ runId: string; content: string }>;
   };
-  assert.equal(artifacts.artifacts[0]?.runId, created.id);
-  assert.equal(artifacts.artifacts[0]?.content, "ACK:api");
+  assert.deepEqual(artifacts.artifacts, []);
 
   const artifactDownload = await fetch(`${base}/v1/artifacts/${created.id}/download`);
-  assert.equal(artifactDownload.status, 200);
-  assert.match(await artifactDownload.text(), /ACK:api/);
+  assert.equal(artifactDownload.status, 404);
 
   const settingsResponse = await fetch(`${base}/v1/settings`, {
     method: "PUT",
@@ -182,15 +180,20 @@ test("Agent API generates IDs, exposes private paths and reports Core registrati
       source: { type: "local", path: source },
       workspace: { strategy: "persistent", access: "read-only" },
       maxConcurrency: 1,
+      approvalPolicy: "workspace",
     }),
   });
   assert.equal(createdResponse.status, 201);
-  const created = (await createdResponse.json()) as { id: string };
+  const created = (await createdResponse.json()) as {
+    id: string;
+    approvalPolicy: string;
+  };
   assert.match(
     created.id,
     /^agt_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
   );
   assert.notEqual(created.id, "client-supplied-id-is-ignored");
+  assert.equal(created.approvalPolicy, "workspace");
 
   const clearedResponse = await fetch(`${base}/v1/agents/${created.id}`, {
     method: "PUT",

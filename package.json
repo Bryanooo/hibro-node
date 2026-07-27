@@ -12,7 +12,13 @@
     "dev": "node --experimental-strip-types --watch src/cli.ts serve",
     "doctor": "node --experimental-strip-types src/cli.ts doctor",
     "run": "node --experimental-strip-types src/cli.ts run",
-    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "test": "node --experimental-strip-types scripts/test-runner.ts",
+    "test:unit": "node --experimental-strip-types scripts/test-runner.ts --layer unit",
+    "test:integration": "node --experimental-strip-types scripts/test-runner.ts --layer integration",
+    "test:list": "node --experimental-strip-types scripts/test-runner.ts --list",
+    "test:report": "node --experimental-strip-types scripts/test-runner.ts --junit",
+    "test:e2e": "playwright test",
+    "test:docker": "node --experimental-strip-types scripts/docker-smoke.ts",
     "check": "node --experimental-strip-types scripts/check.ts",
     "typecheck": "tsc --noEmit",
     "validate": "npm run typecheck && npm run check && npm test",
@@ -23,6 +29,7 @@
     "ws": "^8.18.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.0",
     "@types/node": "^26.1.1",
     "@types/ws": "^8.18.1",
     "typescript": "^7.0.2"

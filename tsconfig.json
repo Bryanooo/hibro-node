@@ -12,5 +12,11 @@
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts"]
+  "include": [
+    "src/**/*.ts",
+    "test/**/*.ts",
+    "e2e/**/*.ts",
+    "scripts/**/*.ts",
+    "playwright.config.ts"
+  ]
 }

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { ClaudeCodeAdapter } from "../src/claude-code-adapter.ts";
+import { FileAgentRegistry } from "../src/agent-registry.ts";
 import type {
   AgentEngineAdapter,
   EngineExecuteInput,
@@ -239,6 +240,7 @@ test("a run pauses for approval and resumes after an operator decision", async (
   const created = await instance.create({
     prompt: "approve",
     workspace: process.cwd(),
+    options: { approvalPolicy: "strict" },
   });
   const deadline = Date.now() + 2_000;
   let requested = false;
@@ -259,6 +261,147 @@ test("a run pauses for approval and resumes after an operator decision", async (
         event.type === "engine.approval.resolved" &&
         event.payload.decision === "allow_once",
     ),
+  );
+});
+
+test("workspace approval policy auto-allows routine work but keeps risky commands gated", async () => {
+  class PolicyAdapter implements AgentEngineAdapter {
+    readonly engineType = "codex" as const;
+    private readonly command: string;
+    constructor(command: string) {
+      this.command = command;
+    }
+    async doctor() {
+      return { installed: true, ready: true };
+    }
+    async execute(input: EngineExecuteInput) {
+      const decision = await input.requestApproval?.({
+        externalId: `approval-${this.command}`,
+        kind: "command",
+        title: "执行命令",
+        command: this.command,
+        cwd: input.workspace,
+      });
+      return { result: `decision:${decision}` };
+    }
+  }
+
+  const createManager = async (command: string) => {
+    const root = await mkdtemp(join(tmpdir(), "hibro-policy-test-"));
+    const agents = new FileAgentRegistry(join(root, "agents.json"));
+    const instance = new RunManager({
+      adapters: [new PolicyAdapter(command)],
+      store: new FileRunStore(root),
+      agents,
+    });
+    await instance.init();
+    const agent = await agents.create({
+      name: "Workspace Auto",
+      engine: "codex",
+      enabled: true,
+      workspace: { strategy: "persistent", access: "workspace-write" },
+      maxConcurrency: 1,
+      approvalPolicy: "workspace",
+    });
+    return { instance, agent };
+  };
+
+  const routine = await createManager("npm test");
+  const routineRun = await routine.instance.create({
+    agentId: routine.agent.id,
+    prompt: "test",
+  });
+  const routineTerminal = await routine.instance.waitForTerminal(routineRun.id);
+  assert.equal(routineTerminal.result, "decision:allow_once");
+  const routineEvents = await routine.instance.eventsAfter(routineRun.id);
+  assert.equal(
+    routineEvents.some((event) => event.type === "engine.approval.requested"),
+    false,
+  );
+  assert.ok(
+    routineEvents.some(
+      (event) =>
+        event.type === "engine.approval.resolved" &&
+        event.payload.automatic === true &&
+        event.payload.policy === "workspace",
+    ),
+  );
+
+  const risky = await createManager("sudo systemctl restart hibro-core");
+  const riskyRun = await risky.instance.create({
+    agentId: risky.agent.id,
+    prompt: "restart",
+  });
+  const deadline = Date.now() + 2_000;
+  while (
+    !(await risky.instance.eventsAfter(riskyRun.id)).some(
+      (event) => event.type === "engine.approval.requested",
+    ) &&
+    Date.now() < deadline
+  ) {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+  }
+  assert.ok(risky.instance.pendingApproval(
+    riskyRun.id,
+    "approval-sudo systemctl restart hibro-core",
+  ));
+  await risky.instance.decideApproval(
+    riskyRun.id,
+    "approval-sudo systemctl restart hibro-core",
+    "deny",
+  );
+  const riskyTerminal = await risky.instance.waitForTerminal(riskyRun.id);
+  assert.equal(riskyTerminal.result, "decision:deny");
+});
+
+test("unrestricted approval policy requires both Agent and Node dangerous switches", async () => {
+  class ApprovalAdapter implements AgentEngineAdapter {
+    readonly engineType = "codex" as const;
+    async doctor() {
+      return { installed: true, ready: true };
+    }
+    async execute(input: EngineExecuteInput) {
+      const decision = await input.requestApproval?.({
+        externalId: "dangerous-approval",
+        kind: "network",
+        title: "发布生产版本",
+        command: "curl https://example.invalid/deploy",
+        cwd: input.workspace,
+      });
+      return { result: `decision:${decision}` };
+    }
+  }
+  const root = await mkdtemp(join(tmpdir(), "hibro-unrestricted-test-"));
+  const agents = new FileAgentRegistry(join(root, "agents.json"));
+  const instance = new RunManager({
+    adapters: [new ApprovalAdapter()],
+    store: new FileRunStore(root),
+    agents,
+  });
+  await instance.init();
+  const agent = await agents.create({
+    name: "Unrestricted",
+    engine: "codex",
+    enabled: true,
+    workspace: { strategy: "persistent", access: "workspace-write" },
+    maxConcurrency: 1,
+    approvalPolicy: "unrestricted",
+    allowDangerousSandbox: true,
+  });
+
+  await assert.rejects(
+    () => instance.create({ agentId: agent.id, prompt: "deploy" }),
+    /requires both Node and Agent danger-full-access switches/,
+  );
+  await instance.updateSettings({ allowDangerousSandbox: true });
+  const run = await instance.create({ agentId: agent.id, prompt: "deploy" });
+  const terminal = await instance.waitForTerminal(run.id);
+  assert.equal(terminal.result, "decision:allow_once");
+  assert.equal(
+    (await instance.eventsAfter(run.id)).some(
+      (event) => event.type === "engine.approval.requested",
+    ),
+    false,
   );
 });
 
@@ -299,7 +442,11 @@ test("collects text and binary deliverables from the isolated artifact directory
   const artifacts = (await instance.listArtifacts()).filter(
     (artifact) => artifact.runId === run.id,
   );
-  assert.equal(artifacts.length, 4);
+  assert.equal(artifacts.length, 3);
+  assert.equal(
+    artifacts.some((artifact) => artifact.fileName === "agent-result.md"),
+    false,
+  );
   assert.equal(
     artifacts.find((artifact) => artifact.fileName === "report.md")?.previewKind,
     "markdown",

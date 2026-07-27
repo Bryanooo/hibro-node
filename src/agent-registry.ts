@@ -1,9 +1,11 @@
 import { mkdir, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import {
+  APPROVAL_POLICIES,
   ENGINE_TYPES,
   WORKSPACE_ACCESS_MODES,
   WORKSPACE_STRATEGIES,
+  type ApprovalPolicy,
   type AgentDefinition,
   type AgentWorkspaceConfig,
   type EngineType,
@@ -28,6 +30,7 @@ interface LegacyAgentDefinition {
   model?: string;
   instructions?: string;
   allowedTools?: string[];
+  approvalPolicy?: ApprovalPolicy;
   allowDangerousSandbox?: boolean;
   createdAt?: string;
   updatedAt?: string;
@@ -132,6 +135,7 @@ export class FileAgentRegistry {
       model: input.model?.trim() || undefined,
       instructions: input.instructions?.trim() || undefined,
       allowedTools: input.allowedTools,
+      approvalPolicy: input.approvalPolicy ?? "workspace",
       allowDangerousSandbox: input.allowDangerousSandbox ?? false,
       createdAt: previous?.createdAt ?? now,
       updatedAt: now,
@@ -139,9 +143,10 @@ export class FileAgentRegistry {
     if (!Number.isInteger(agent.maxConcurrency) || agent.maxConcurrency < 1) {
       throw new Error("maxConcurrency must be a positive integer");
     }
-    this.agents.set(agent.id, agent);
+    const validated = this.validateNormalized(agent);
+    this.agents.set(validated.id, validated);
     await this.persist();
-    return agent;
+    return validated;
   }
 
   async delete(id: string): Promise<boolean> {
@@ -169,6 +174,7 @@ export class FileAgentRegistry {
       model: value.model,
       instructions: value.instructions,
       allowedTools: value.allowedTools,
+      approvalPolicy: value.approvalPolicy ?? "workspace",
       allowDangerousSandbox: value.allowDangerousSandbox ?? false,
       createdAt: value.createdAt ?? now,
       updatedAt: value.updatedAt ?? now,
@@ -183,6 +189,21 @@ export class FileAgentRegistry {
     }
     if (!WORKSPACE_ACCESS_MODES.includes(agent.workspace.access)) {
       throw new Error(`unsupported workspace access: ${agent.workspace.access}`);
+    }
+    if (
+      agent.approvalPolicy &&
+      !APPROVAL_POLICIES.includes(agent.approvalPolicy)
+    ) {
+      throw new Error(`unsupported approval policy: ${agent.approvalPolicy}`);
+    }
+    if (
+      agent.approvalPolicy === "unrestricted" &&
+      (agent.allowDangerousSandbox !== true ||
+        agent.workspace.access !== "workspace-write")
+    ) {
+      throw new Error(
+        "unrestricted approval policy requires a writable Agent with danger-full-access enabled",
+      );
     }
     if (!Number.isInteger(agent.maxConcurrency) || agent.maxConcurrency < 1) {
       throw new Error("maxConcurrency must be a positive integer");
@@ -268,6 +289,7 @@ export class FileAgentRegistry {
       workspace: { strategy: "persistent", access: variant.access },
       maxConcurrency: 1,
       allowedTools: variant.allowedTools,
+      approvalPolicy: "workspace",
       allowDangerousSandbox: false,
       createdAt: now,
       updatedAt: now,

@@ -2,9 +2,18 @@ import { EventEmitter } from "node:events";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, readdir, stat } from "node:fs/promises";
-import { basename, extname, join, relative, resolve } from "node:path";
 import {
+  basename,
+  extname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+} from "node:path";
+import {
+  APPROVAL_POLICIES,
   isTerminalStatus,
+  type ApprovalPolicy,
   type ArtifactRecord,
   type AgentDefinition,
   type AgentRuntime,
@@ -44,6 +53,50 @@ export interface RunManagerOptions {
 interface DoctorCache {
   value: EngineDoctorResult;
   expiresAt: number;
+}
+
+const READ_ONLY_COMMAND =
+  /^(?:pwd|ls|find|rg|grep|cat|head|tail|wc|stat|file|git\s+(?:status|diff|log|show|branch))(?:\s|$)/i;
+
+const HIGH_RISK_COMMANDS = [
+  /\b(?:sudo|su)\b/i,
+  /\b(?:ssh|scp|sftp|curl|wget|nc|ncat|socat)\b/i,
+  /\b(?:systemctl|service|launchctl|shutdown|reboot|mount|umount)\b/i,
+  /\b(?:chmod|chown|kill|pkill|killall)\b/i,
+  /\b(?:brew|apt|apt-get|yum|dnf|pacman)\b/i,
+  /\b(?:docker|podman|kubectl|helm|terraform|ansible)\b/i,
+  /\bgit\s+(?:push|send-email)\b/i,
+  /\b(?:npm|pnpm|yarn)\s+(?:publish|login|logout|adduser)\b/i,
+  /\b(?:rm|shred)\b[^\n]*(?:-[a-z]*r[a-z]*f|-[a-z]*f[a-z]*r|--recursive)\b/i,
+  /\bcd\s+(?:\/|~\/|\.\.(?:\/|\s|$))/i,
+  /(?:^|[\s'"])(?:~\/|\/(?:etc|var|opt|usr|bin|sbin|Library|Users|home|root)(?:\/|$))/,
+  /(?:^|\s)(?:>|>>)\s*(?:\/|~\/)/,
+  /(?:^|[\s'"])\.\.\//,
+] as const;
+
+function isInsidePath(candidate: string, root: string): boolean {
+  const result = relative(resolve(root), resolve(candidate));
+  return result === "" || (!result.startsWith("..") && !isAbsolute(result));
+}
+
+function payloadPaths(
+  value: unknown,
+  key = "",
+  depth = 0,
+): string[] {
+  if (depth > 5 || value === null || value === undefined) return [];
+  if (typeof value === "string") {
+    return /(?:^|_)(?:path|file|notebook)(?:$|_)/i.test(key)
+      ? [value]
+      : [];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => payloadPaths(item, key, depth + 1));
+  }
+  if (typeof value !== "object") return [];
+  return Object.entries(value as Record<string, unknown>).flatMap(
+    ([childKey, child]) => payloadPaths(child, childKey, depth + 1),
+  );
 }
 
 export class RunManager {
@@ -202,25 +255,6 @@ export class RunManager {
     const artifacts: ArtifactRecord[] = [];
     for (const run of await this.store.list()) {
       if (run.status !== "completed") continue;
-      if (run.result) {
-        const content = run.result;
-        artifacts.push({
-          id: run.id,
-          runId: run.id,
-          agentId: run.agentId,
-          engine: run.engine,
-          title: run.request.prompt.split("\n")[0]?.slice(0, 100) || "Agent output",
-          content,
-          contentType: "text/markdown",
-          previewKind: "markdown",
-          fileName: "agent-result.md",
-          sizeBytes: Buffer.byteLength(content),
-          sha256: createHash("sha256").update(content).digest("hex"),
-          encoding: "utf8",
-          createdAt: run.finishedAt ?? run.updatedAt,
-          workspacePath: run.workspace?.path,
-        });
-      }
       if (run.workspace?.artifactPath) {
         artifacts.push(
           ...(await this.scanArtifactDirectory(run, run.workspace.artifactPath)),
@@ -688,6 +722,17 @@ export class RunManager {
     request: EngineApprovalRequest,
     signal: AbortSignal,
   ): Promise<EngineApprovalDecision> {
+    const automaticDecision = this.automaticApprovalDecision(run, request);
+    if (automaticDecision) {
+      await this.emit(run.id, "engine.approval.resolved", {
+        externalId: request.externalId,
+        decision: automaticDecision,
+        automatic: true,
+        policy: run.request.options?.approvalPolicy ?? "strict",
+        request,
+      });
+      return automaticDecision;
+    }
     const trustKey = this.approvalTrustKey(run.id, request);
     const trustedUntil = this.sessionApprovals.get(trustKey);
     if (trustedUntil && trustedUntil > Date.now()) return "allow_once";
@@ -726,8 +771,57 @@ export class RunManager {
       run?.request.sessionKey?.trim() || runId,
       request.kind,
       request.toolName ?? "",
-      request.command ?? request.title,
     ].join(":");
+  }
+
+  private automaticApprovalDecision(
+    run: RunRecord,
+    request: EngineApprovalRequest,
+  ): EngineApprovalDecision | undefined {
+    const policy = run.request.options?.approvalPolicy ?? "strict";
+    if (policy === "strict") return undefined;
+    if (policy === "unrestricted") return "allow_once";
+
+    const workspace = run.workspace?.path ?? run.request.workspace;
+    if (!workspace) return undefined;
+    const cwd = request.cwd ?? workspace;
+    if (!isInsidePath(cwd, workspace)) return undefined;
+    if (request.kind === "network" || request.kind === "permission") {
+      return undefined;
+    }
+
+    const paths = payloadPaths(request.payload);
+    if (
+      paths.some((path) => {
+        const candidate = isAbsolute(path) ? path : resolve(cwd, path);
+        return !isInsidePath(candidate, workspace);
+      })
+    ) {
+      return undefined;
+    }
+
+    if (request.kind === "file_change") {
+      return run.workspace?.writable === true ? "allow_once" : undefined;
+    }
+    if (request.kind === "command") {
+      const command = request.command?.trim();
+      if (!command) return undefined;
+      if (HIGH_RISK_COMMANDS.some((pattern) => pattern.test(command))) {
+        return undefined;
+      }
+      if (run.workspace?.writable !== true && !READ_ONLY_COMMAND.test(command)) {
+        return undefined;
+      }
+      return "allow_once";
+    }
+    if (request.kind === "tool") {
+      return /^(?:Read|Grep|Glob|LS|TodoRead|TodoWrite|NotebookRead)$/i.test(
+        request.toolName ?? "",
+      )
+        ? "allow_once"
+        : undefined;
+    }
+    return undefined;
   }
 
   private applySuccess(run: RunRecord, result: EngineExecutionResult): void {
@@ -868,8 +962,20 @@ export class RunManager {
     sessionId: string | undefined,
   ): NonNullable<CreateRunInput["options"]> {
     const requestedSandbox = input.options?.sandbox;
+    const requestedApprovalPolicy = input.options?.approvalPolicy;
+    const agentApprovalPolicy = agent.approvalPolicy ?? "workspace";
+    if (
+      requestedApprovalPolicy &&
+      !APPROVAL_POLICIES.includes(requestedApprovalPolicy)
+    ) {
+      throw new Error(
+        `Unsupported approval policy: ${requestedApprovalPolicy}`,
+      );
+    }
     const dangerousAllowed =
-      settings.allowDangerousSandbox && agent.allowDangerousSandbox === true;
+      settings.allowDangerousSandbox &&
+      agent.allowDangerousSandbox === true &&
+      lease.writable;
     const policySandbox = dangerousAllowed
       ? ("danger-full-access" as const)
       : lease.writable
@@ -886,6 +992,25 @@ export class RunManager {
       !dangerousAllowed
     ) {
       throw new Error("bypassPermissions requires an Agent explicitly allowed to use danger-full-access");
+    }
+    const approvalRank: Record<ApprovalPolicy, number> = {
+      strict: 0,
+      workspace: 1,
+      unrestricted: 2,
+    };
+    if (
+      requestedApprovalPolicy &&
+      approvalRank[requestedApprovalPolicy] > approvalRank[agentApprovalPolicy]
+    ) {
+      throw new Error(
+        `Requested approval policy ${requestedApprovalPolicy} exceeds Agent policy ${agentApprovalPolicy}`,
+      );
+    }
+    const approvalPolicy = requestedApprovalPolicy ?? agentApprovalPolicy;
+    if (approvalPolicy === "unrestricted" && !dangerousAllowed) {
+      throw new Error(
+        "unrestricted approval policy requires both Node and Agent danger-full-access switches",
+      );
     }
     const requestedTools = input.options?.allowedTools;
     if (requestedTools && agent.allowedTools) {
@@ -908,6 +1033,7 @@ export class RunManager {
           `Hibro 产物目录：${artifactPath}\n需要交付给用户预览或下载的文件，请写入该目录。不要把密钥、Token、环境变量或其他秘密写入产物。最终回复中简要列出生成的文件。`,
         ].filter(Boolean).join("\n\n") || undefined,
       sandbox: requestedSandbox ?? policySandbox,
+      approvalPolicy,
     };
   }
 

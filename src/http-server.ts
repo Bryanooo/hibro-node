@@ -369,6 +369,7 @@ export function createHibroHttpServer(options: HttpServerOptions): Server {
           model: body.model,
           instructions: body.instructions,
           allowedTools: body.allowedTools,
+          approvalPolicy: body.approvalPolicy ?? "workspace",
           allowDangerousSandbox: body.allowDangerousSandbox ?? false,
         });
         sendJson(response, 201, agent);

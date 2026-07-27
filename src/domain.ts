@@ -62,6 +62,13 @@ export type PermissionMode =
   | "dontAsk"
   | "plan";
 
+export const APPROVAL_POLICIES = [
+  "strict",
+  "workspace",
+  "unrestricted",
+] as const;
+export type ApprovalPolicy = (typeof APPROVAL_POLICIES)[number];
+
 export interface ClaudeRunOptions {
   model?: string | undefined;
   sessionId?: string | undefined;
@@ -74,6 +81,7 @@ export interface ClaudeRunOptions {
 
 export interface EngineRunOptions extends ClaudeRunOptions {
   sandbox?: "read-only" | "workspace-write" | "danger-full-access" | undefined;
+  approvalPolicy?: ApprovalPolicy | undefined;
 }
 
 export interface AgentDefinition {
@@ -92,6 +100,7 @@ export interface AgentDefinition {
   model?: string | undefined;
   instructions?: string | undefined;
   allowedTools?: string[] | undefined;
+  approvalPolicy?: ApprovalPolicy | undefined;
   allowDangerousSandbox?: boolean | undefined;
   createdAt: string;
   updatedAt: string;

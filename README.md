@@ -64,6 +64,27 @@ Agent 配置默认项目，也可以只在创建某次 Run 时临时挂载项目
 旧版 `projectRoot`、`workspaceMode` 会在启动时自动迁移到新结构；已经存在的 Agent ID
 和历史 Run 不会改变。
 
+### Agent 审批策略
+
+审批由实际执行命令的 Hibro Node 强制实施，而不是由 Core 或 App 绕过。每个 Agent
+可以在管理页选择：
+
+| 策略 | 行为 | 建议场景 |
+|---|---|---|
+| `strict` | 引擎请求的敏感操作逐次发送给人审批 | 生产、陌生项目 |
+| `workspace` | 工作区内的常规读写与开发命令自动允许；网络、提权、部署、越界路径和破坏性命令仍需审批 | 日常开发，推荐 |
+| `unrestricted` | Node 自动允许所有引擎审批请求 | 仅限外部隔离的 Docker 或临时机器 |
+
+所有新建 Agent 默认使用 `workspace`。升级前已经存在、尚未保存审批策略字段的
+Agent，也会在首次读取新版本配置时自动迁移为 `workspace`；已经明确保存的策略
+不会被迁移覆盖。`unrestricted` 必须同时开启 Node 系统设置中的
+`allowDangerousSandbox`、Agent 自身的 `allowDangerousSandbox` 和可写工作区，否则
+Run 会被 Node 拒绝。单次 Run 可以请求更严格的 `options.approvalPolicy`，但不能
+超过 Agent 策略。
+
+“本会话允许”会在当前 Node 进程中按 Agent、会话、操作类型和工具记忆 8 小时；Node
+重启后自动失效。
+
 ## 默认项目、Run 项目与 Agent 专属空间
 
 Agent 本身不等于代码项目。“默认项目”是可选项，对应 Agent 定义中的 `source.path`；
@@ -296,7 +317,7 @@ PUT    /v1/settings
 GET    /v1/system
 GET    /v1/workspaces
 GET    /v1/artifacts
-GET    /v1/artifacts/:runId/download
+GET    /v1/artifacts/:artifactId/download
 POST   /v1/agents
 GET    /v1/agents/:id
 PUT    /v1/agents/:id
@@ -307,7 +328,9 @@ POST   /v1/capabilities/refresh
 系统配置和 Agent 定义都写入数据目录。运行历史保留天数会在服务启动和保存设置时清理
 过期且已经结束的 Run；活动 Run 不会被清理。
 
-每个产物都带有独立的 Core 同步状态，并在产物页面和 `GET /v1/artifacts` 中展示：
+Agent 的普通文本回复保存在 Run/会话中，不会再包装成 `agent-result.md` 产物。只有
+Agent 明确写入当前 Run 产物目录的文件才会出现在产物页面和 `GET /v1/artifacts`。
+每个真实文件产物都带有独立的 Core 同步状态：
 
 - `local_only`：仅保存在 Node，本机独立运行时这是正常状态；
 - `pending`：Node 已配置 Core，等待连接或上传授权；

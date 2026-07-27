@@ -1,0 +1,66 @@
+name: Hibro Node CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: hibro-node-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: TypeScript and Node tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run check
+      - run: npm run test:report
+      - name: Upload Node test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-test-results
+          path: test-results/
+          if-no-files-found: warn
+
+  browser:
+    name: Console browser tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+      - name: Upload browser test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-test-results
+          path: |
+            test-results/
+            playwright-report/
+          if-no-files-found: warn
+
+  docker:
+    name: Docker image smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run test:docker

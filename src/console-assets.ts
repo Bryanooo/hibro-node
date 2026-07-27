@@ -163,7 +163,7 @@ export const CONSOLE_HTML = `<!doctype html>
             <span class="toolbar-note">已完成运行的最终输出</span>
           </div>
           <div class="artifact-grid" id="artifact-grid"></div>
-          <div class="empty-state large" id="artifacts-empty" hidden><b>暂无产出</b><p>Agent 成功完成运行后，最终结果会自动归档到这里。</p></div>
+          <div class="empty-state large" id="artifacts-empty" hidden><b>暂无产出</b><p>Agent 明确生成到产物目录的文件会出现在这里；文本回复请在会话中查看。</p></div>
         </section>
 
         <section class="view" id="view-workspaces" data-view-panel="workspaces">
@@ -282,6 +282,7 @@ export const CONSOLE_HTML = `<!doctype html>
             <label><span>专属空间保留方式</span><select id="agent-workspace-strategy" required><option value="persistent">持续保留，后续继续使用</option><option value="per-run">每次运行创建新空间</option><option value="scratch">每次使用空白临时空间</option></select></label>
             <label><span>专属空间权限</span><select id="agent-workspace-access" required><option value="read-only">只读</option><option value="workspace-write">允许修改</option></select></label>
           </div>
+          <label><span>审批策略</span><select id="agent-approval-policy" required><option value="strict">安全模式 · 敏感操作逐次询问</option><option value="workspace">工作区自动 · 推荐</option><option value="unrestricted">完全自动 · 高风险</option></select><small id="agent-approval-hint">工作区内的常规开发操作自动允许；网络、提权、部署和破坏性命令仍需审批。</small></label>
           <div class="workspace-preview" id="agent-workspace-preview"></div>
           <label><span>最大并发</span><input id="agent-concurrency" type="number" min="1" max="16" value="1" required /></label>
           <label><span>Agent 指令</span><textarea id="agent-instructions" rows="4" placeholder="每次运行都会附加到系统提示词。"></textarea></label>
@@ -833,6 +834,14 @@ function accessLabel(value) {
   return value === "read-only" ? "只读" : "允许写入";
 }
 
+function approvalPolicyLabel(value) {
+  return {
+    strict: "安全审批",
+    workspace: "工作区自动",
+    unrestricted: "完全自动",
+  }[value] || "安全审批";
+}
+
 function coreLabel(value) {
   return {
     standalone: "Core 未启用",
@@ -1039,7 +1048,7 @@ function renderAgents() {
     head.append(name, statusNode(runtime.status));
     card.append(head, el("p", "agent-description", agent.description || "未填写 Agent 描述"));
     const tags = el("div", "tag-list");
-    [engineLabel(agent.engine), workspaceLabel(agent.workspace.strategy), accessLabel(agent.workspace.access), "并发 " + agent.maxConcurrency, agent.model || "默认模型"].forEach((value) => tags.append(el("span", "tag", value)));
+    [engineLabel(agent.engine), workspaceLabel(agent.workspace.strategy), accessLabel(agent.workspace.access), approvalPolicyLabel(agent.approvalPolicy), "并发 " + agent.maxConcurrency, agent.model || "默认模型"].forEach((value) => tags.append(el("span", "tag", value)));
     card.append(
       tags,
       el("code", "agent-path", agent.source?.path
@@ -1566,6 +1575,7 @@ function openAgentDialog(agentId) {
   byId("agent-enabled").checked = true;
   byId("agent-dangerous").checked = false;
   byId("agent-concurrency").value = "1";
+  byId("agent-approval-policy").value = "workspace";
   const runtime = agentRuntime(agentId);
   const agent = runtime?.agent;
   byId("agent-dialog-title").textContent = agent ? "编辑 " + agent.name : "新建 Agent";
@@ -1583,6 +1593,7 @@ function openAgentDialog(agentId) {
     byId("agent-concurrency").value = String(agent.maxConcurrency);
     byId("agent-instructions").value = agent.instructions || "";
     byId("agent-tools").value = (agent.allowedTools || []).join(", ");
+    byId("agent-approval-policy").value = agent.approvalPolicy || "workspace";
     byId("agent-enabled").checked = agent.enabled;
     byId("agent-dangerous").checked = agent.allowDangerousSandbox === true;
   } else {
@@ -1591,8 +1602,26 @@ function openAgentDialog(agentId) {
     byId("agent-workspace-access").value =
       byId("agent-engine").value === "claude-code" ? "read-only" : "workspace-write";
   }
+  updateAgentApprovalPolicy();
   updateAgentWorkspacePreview();
   openDialog("agent-dialog");
+}
+
+function updateAgentApprovalPolicy() {
+  const policy = byId("agent-approval-policy").value;
+  const dangerous = byId("agent-dangerous");
+  const hint = byId("agent-approval-hint");
+  if (policy === "unrestricted") {
+    byId("agent-workspace-access").value = "workspace-write";
+    dangerous.checked = true;
+    dangerous.disabled = true;
+    hint.textContent = "所有引擎审批会由 Node 自动允许；仅适用于隔离环境，并且还需开启系统 danger-full-access 总开关。";
+  } else {
+    dangerous.disabled = false;
+    hint.textContent = policy === "workspace"
+      ? "工作区内的常规开发操作自动允许；网络、提权、部署和破坏性命令仍需审批。"
+      : "引擎请求的敏感操作会发送到 Core 和 App，由你逐次决定。";
+  }
 }
 
 function updateAgentWorkspacePreview() {
@@ -1791,6 +1820,7 @@ async function saveAgent(event) {
     model: byId("agent-model").value.trim() || undefined,
     instructions: byId("agent-instructions").value.trim() || undefined,
     allowedTools: byId("agent-tools").value.split(",").map((value) => value.trim()).filter(Boolean),
+    approvalPolicy: byId("agent-approval-policy").value,
     allowDangerousSandbox: byId("agent-dangerous").checked,
     enabled: byId("agent-enabled").checked,
   };
@@ -1922,6 +1952,7 @@ byId("banner-action").addEventListener("click", () => setView("engines"));
 byId("run-agent").addEventListener("change", updateRunPreview);
 byId("agent-workspace-strategy").addEventListener("change", updateAgentWorkspacePreview);
 byId("agent-workspace-access").addEventListener("change", updateAgentWorkspacePreview);
+byId("agent-approval-policy").addEventListener("change", updateAgentApprovalPolicy);
 byId("agent-source-path").addEventListener("input", updateAgentWorkspacePreview);
 byId("agent-engine").addEventListener("change", () => {
   if (!state.editingAgentId) {

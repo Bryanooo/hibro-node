@@ -135,6 +135,41 @@ export class WorkspaceManager {
     return [...(this.activeByAgent.get(agentId) ?? [])];
   }
 
+  async purgeRun(agentId: string, runId: string): Promise<void> {
+    if (this.activeByAgent.get(agentId)?.has(runId)) return;
+    const paths = this.pathsFor(agentId);
+    await Promise.all([
+      rm(join(paths.runs, runId), { recursive: true, force: true }),
+      rm(join(paths.artifacts, runId), { recursive: true, force: true }),
+    ]);
+  }
+
+  async purgeAgent(agentId: string): Promise<void> {
+    if ((this.activeByAgent.get(agentId)?.size ?? 0) > 0) {
+      throw new WorkspaceBusyError(agentId);
+    }
+    await rm(this.pathsFor(agentId).root, { recursive: true, force: true });
+  }
+
+  async pruneOrphanRuns(validRunIds: Set<string>): Promise<string[]> {
+    const removed: string[] = [];
+    for (const agent of await readdir(this.rootDir, { withFileTypes: true }).catch(() => [])) {
+      if (!agent.isDirectory()) continue;
+      const paths = this.pathsFor(agent.name);
+      for (const parent of [paths.runs, paths.artifacts]) {
+        for (const entry of await readdir(parent, { withFileTypes: true }).catch(() => [])) {
+          if (!entry.isDirectory() || !/^(?:run_)?[0-9a-f-]{36,40}$/i.test(entry.name)) continue;
+          if (validRunIds.has(entry.name)) continue;
+          await rm(join(parent, entry.name), { recursive: true, force: true });
+          removed.push(join(parent, entry.name));
+        }
+      }
+      const repositoryPath = join(paths.state, "source.git");
+      await this.git(repositoryPath, ["worktree", "prune"]).catch(() => undefined);
+    }
+    return removed;
+  }
+
   private async resolveWorkspace(
     strategy: WorkspaceStrategy,
     source: AgentSource | undefined,

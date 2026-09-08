@@ -68,6 +68,18 @@ export class CoreTransport {
     this.socket?.close(1001, "Node shutdown");
   }
 
+  async refreshCapabilities(): Promise<void> {
+    if (
+      this.socket?.readyState === WebSocket.OPEN ||
+      this.socket?.readyState === WebSocket.CONNECTING
+    ) {
+      // hibro.node.v1 permits exactly one node.hello per connection. Reconnect
+      // so Core receives an authoritative replacement capability snapshot.
+      this.lastFingerprint = "";
+      this.socket.close(1000, "engine capabilities changed");
+    }
+  }
+
   private reconcile(): void {
     if (this.stopped) return;
     const settings = this.manager.getSettings();
@@ -115,7 +127,7 @@ export class CoreTransport {
     const socket = new WebSocket(url, "hibro.node.v1", {
       headers: { Authorization: `Bearer ${settings.coreToken}` },
       handshakeTimeout: 10_000,
-      maxPayload: 1_048_576,
+      maxPayload: 2_097_152,
     });
     this.socket = socket;
     socket.on("open", () => {
@@ -282,6 +294,9 @@ export class CoreTransport {
         });
         break;
       }
+      case "agent.revision.deploy":
+        await this.handleAgentRevisionDeploy(message);
+        break;
       case "run.create":
         await this.handleRunCreate(message);
         break;
@@ -363,6 +378,15 @@ export class CoreTransport {
           id,
           version: doctor.version,
           ready: doctor.ready,
+          installed: doctor.installed,
+          enabled:
+            typeof (doctor.management as { enabled?: unknown } | undefined)?.enabled === "boolean"
+              ? (doctor.management as { enabled: boolean }).enabled
+              : true,
+          managedVersion:
+            typeof (doctor.management as { installedVersion?: unknown } | undefined)?.installedVersion === "string"
+              ? (doctor.management as { installedVersion: string }).installedVersion
+              : undefined,
         })),
         transports: ["websocket"],
         features: [
@@ -374,8 +398,14 @@ export class CoreTransport {
           "conversations",
           "conversation-events",
           "conversation-approvals",
+          "agent-as-code-v1",
+          "agent-revision-deployments",
+          "observability-trace-v1",
+          "structured-run-events",
+          "redacted-engine-logs",
+          "engine-lifecycle-v1",
         ],
-        maxFrameBytes: 1_048_576,
+        maxFrameBytes: 2_097_152,
       },
     });
   }
@@ -442,7 +472,17 @@ export class CoreTransport {
       commandId: string;
       agentId: string;
       request: Record<string, unknown>;
+      environment?: Record<string, unknown>;
     };
+    const environment: Record<string, string> = {};
+    const reservedEnvironment = new Set(["PATH", "HOME", "SHELL", "PWD", "NODE_OPTIONS", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "OPENCLAW_HOME", "OPENCLAW_STATE_DIR", "OPENCLAW_CONFIG_PATH", "OPENCLAW_WORKSPACE_DIR"]);
+    for (const [key, value] of Object.entries(payload.environment ?? {})) {
+      if (!/^[A-Z][A-Z0-9_]{1,79}$/.test(key) || key.startsWith("HIBRO_") || reservedEnvironment.has(key) || typeof value !== "string" || value.length > 16_384) {
+        throw new Error("Core supplied an invalid runtime environment secret");
+      }
+      environment[key] = value;
+    }
+    if (Object.keys(environment).length > 64) throw new Error("Core supplied too many runtime environment secrets");
     const existing = (await this.manager.list()).find(
       (run) => run.request.metadata?.coreCommandId === payload.commandId,
     );
@@ -464,14 +504,17 @@ export class CoreTransport {
     }
     const run =
       existing ??
-      (await this.manager.create({
-        ...(payload.request as unknown as Parameters<RunManager["create"]>[0]),
-        agentId: payload.agentId,
-        metadata: {
-          ...((payload.request.metadata as Record<string, unknown> | undefined) ?? {}),
-          coreCommandId: payload.commandId,
+      (await this.manager.create(
+        {
+          ...(payload.request as unknown as Parameters<RunManager["create"]>[0]),
+          agentId: payload.agentId,
+          metadata: {
+            ...((payload.request.metadata as Record<string, unknown> | undefined) ?? {}),
+            coreCommandId: payload.commandId,
+          },
         },
-      }));
+        { environment },
+      ));
     this.send(
       "run.accepted",
       {
@@ -486,6 +529,56 @@ export class CoreTransport {
       { run },
       { correlationId: message.correlationId, requiresAck: true },
     );
+  }
+
+  private async handleAgentRevisionDeploy(message: HibroCoreMessage): Promise<void> {
+    const payload = message.payload as unknown as {
+      deploymentId: string;
+      definitionId: string;
+      agentId: string;
+      revisionId: string;
+      revision: number;
+      contentHash: string;
+      bundle: import("./agent-package.ts").AgentPackageBundle;
+    };
+    const status = (
+      value: "installing" | "active" | "failed",
+      error?: string,
+    ): void => {
+      this.send(
+        "agent.deployment.status",
+        {
+          deploymentId: payload.deploymentId,
+          definitionId: payload.definitionId,
+          agentId: payload.agentId,
+          revisionId: payload.revisionId,
+          status: value,
+          observedAt: new Date().toISOString(),
+          ...(error ? { error } : {}),
+        },
+        {
+          correlationId: payload.deploymentId,
+          causationId: message.messageId,
+          requiresAck: true,
+        },
+      );
+    };
+    status("installing");
+    try {
+      await this.manager.deployAgentPackage({
+        agentId: payload.agentId,
+        definitionId: payload.definitionId,
+        revisionId: payload.revisionId,
+        revision: payload.revision,
+        expectedHash: payload.contentHash,
+        origin: "hibro-core",
+        bundle: payload.bundle,
+      });
+      status("active");
+      await this.sendSnapshot();
+    } catch (error) {
+      status("failed", error instanceof Error ? error.message : String(error));
+    }
   }
 
   private async handleRunCancel(message: HibroCoreMessage): Promise<void> {
@@ -636,12 +729,23 @@ export class CoreTransport {
   private async forwardRunEvent(event: RunEvent): Promise<void> {
     const run = await this.manager.get(event.runId);
     if (!run) return;
-    this.send("run.event", { event }, { requiresAck: true, correlationId: event.runId });
-    this.send(
-      "run.snapshot",
-      { run },
-      { correlationId: event.runId, requiresAck: true },
-    );
+    this.send("run.event", { event }, {
+      requiresAck: true,
+      correlationId: event.runId,
+      ...(event.traceId ? {
+        trace: {
+          traceId: event.traceId,
+          ...(event.spanId ? { spanId: event.spanId } : {}),
+        },
+      } : {}),
+    });
+    if (["run.created", "run.started", "run.cancelling", "run.completed", "run.failed"].includes(event.type)) {
+      this.send(
+        "run.snapshot",
+        { run },
+        { correlationId: event.runId, requiresAck: true },
+      );
+    }
     if (event.type === "run.completed") {
       const artifacts = (await this.manager.listArtifacts()).filter(
         (candidate) => candidate.runId === run.id,
@@ -663,7 +767,8 @@ export class CoreTransport {
       existing &&
       existing.sha256 === artifact.sha256 &&
       existing.targetCore === settings.coreUrl &&
-      (["uploading", "synced"].includes(existing.status) ||
+      (existing.status === "synced" ||
+        (existing.status === "uploading" && this.uploadingArtifacts.has(artifact.id)) ||
         (existing.status === "pending" && !retryPending))
     ) {
       return;
@@ -723,6 +828,7 @@ export class CoreTransport {
         method: "PUT",
         headers: payload.headers,
         body: body as unknown as BodyInit,
+        signal: AbortSignal.timeout(artifactUploadTimeoutMs()),
         ...(artifact.localPath ? { duplex: "half" } : {}),
       } as RequestInit & { duplex?: "half" });
       if (!response.ok) {
@@ -787,7 +893,11 @@ export class CoreTransport {
       });
     }
     if (this.isOpen()) {
-      this.socket?.send(envelopeJson);
+      if ((this.socket?.bufferedAmount ?? 0) > 8 * 1024 * 1024) {
+        this.socket?.close(1013, "slow consumer");
+      } else {
+        this.socket?.send(envelopeJson);
+      }
       if (message.requiresAck) this.deferCoreMessage(message.messageId, 3_000);
     }
     return message.messageId;
@@ -820,6 +930,10 @@ export class CoreTransport {
   private flushOutbox(): void {
     if (!this.isOpen()) return;
     for (const record of this.manager.store.pendingCoreMessages(new Date(), 100)) {
+      if ((this.socket?.bufferedAmount ?? 0) > 8 * 1024 * 1024) {
+        this.socket?.close(1013, "slow consumer");
+        return;
+      }
       const stored = parseCoreEnvelope(JSON.parse(record.envelopeJson));
       this.sequence += 1;
       this.socket?.send(
@@ -895,4 +1009,12 @@ export class CoreTransport {
     }, 3_000);
     this.reconnectTimer.unref();
   }
+}
+
+function artifactUploadTimeoutMs(): number {
+  const timeout = Number(process.env.HIBRO_NODE_ARTIFACT_UPLOAD_TIMEOUT_MS ?? 300_000);
+  if (!Number.isSafeInteger(timeout) || timeout < 1_000 || timeout > 3_600_000) {
+    throw new Error("HIBRO_NODE_ARTIFACT_UPLOAD_TIMEOUT_MS must be an integer between 1000 and 3600000");
+  }
+  return timeout;
 }

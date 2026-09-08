@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { join } from "node:path";
 
 test.beforeEach(async ({ page }) => {
   await page.goto("/console#/agents");
@@ -20,6 +21,54 @@ test("all creation and run dialogs can be closed", async ({ page }) => {
     .filter({ hasText: "取消" })
     .click();
   await expect(page.locator("#run-dialog")).toBeHidden();
+});
+
+test("engine lifecycle can disable and re-enable an engine", async ({ page }) => {
+  await page.getByRole("button", { name: "引擎" }).click();
+  const card = page.locator('.engine-card[data-engine-id="codex"]');
+  await expect(card).toBeVisible();
+  await expect(card).toContainText(/镜像内置|系统已有/);
+
+  const disableResponse = page.waitForResponse((response) =>
+    response.url().endsWith("/v1/engines/codex/disable") && response.request().method() === "POST",
+  );
+  await card.getByRole("button", { name: "停用" }).click();
+  expect((await disableResponse).status()).toBe(200);
+  await expect(card.getByRole("button", { name: "启用" })).toBeVisible();
+
+  const enableResponse = page.waitForResponse((response) =>
+    response.url().endsWith("/v1/engines/codex/enable") && response.request().method() === "POST",
+  );
+  await card.getByRole("button", { name: "启用" }).click();
+  expect((await enableResponse).status()).toBe(200);
+  await expect(card.getByRole("button", { name: "停用" })).toBeVisible();
+});
+
+test("observability lists a trace and opens its execution details", async ({ page }) => {
+  const run = await page.evaluate(async () => {
+    const response = await fetch("/v1/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "observability e2e", workspace: "." }),
+    });
+    return await response.json() as { id: string };
+  });
+  await expect.poll(async () => page.evaluate(async (runId) => {
+    const response = await fetch(`/v1/runs/${runId}`);
+    return ((await response.json()) as { status: string }).status;
+  }, run.id)).toBe("completed");
+
+  await page.reload();
+  await page.getByRole("button", { name: "观测中心" }).click();
+  await expect(page.locator("#view-observability")).toHaveClass(/active/);
+  const row = page.locator("#obs-trace-body tr", { hasText: "observability e2e" });
+  await expect(row).toBeVisible();
+  await expect(row).toContainText("Claude Code");
+  await row.click();
+  await expect(page.locator("#run-detail-dialog")).toBeVisible();
+  await expect(page.locator("#detail-events")).toContainText("run.completed");
+  await page.getByRole("button", { name: "关闭运行详情" }).click();
+  await expect(page.locator("#run-detail-dialog")).toBeHidden();
 });
 
 test("creates an Agent without a project and runs it in its private workspace", async ({
@@ -125,4 +174,39 @@ test("system and workspace pages expose one isolated Hibro Home", async ({ page 
     workspacePayload.workspaces.length,
   );
   await expect(page.locator("#workspaces-body")).toContainText("默认使用空白专属空间");
+});
+
+test("imports, revisions and rolls back an Agent as Code package", async ({ page }) => {
+  await page.getByRole("button", { name: "Agent 源码" }).click();
+  await expect(page.locator("#view-definitions")).toHaveClass(/active/);
+  const firstPath = join(process.cwd(), "test/fixtures/agent-packages/e2e-codex-v1");
+  await page.locator("#agent-package-path").fill(firstPath);
+  const firstResponsePromise = page.waitForResponse((response) =>
+    response.url().endsWith("/v1/agent-packages/import") && response.request().method() === "POST",
+  );
+  await page.getByRole("button", { name: "校验、编译并激活" }).click();
+  const firstResponse = await firstResponsePromise;
+  expect(firstResponse.status()).toBe(201);
+  const first = (await firstResponse.json()) as { revision: { agentId: string } };
+  await expect(page.locator("#agent-revisions-body")).toContainText("Revision 1");
+  await expect(page.locator("#agent-revisions-body")).toContainText("已激活");
+
+  const secondPath = join(process.cwd(), "test/fixtures/agent-packages/e2e-codex-v2");
+  await page.locator("#agent-package-path").fill(secondPath);
+  await page.locator("#agent-package-target").selectOption(first.revision.agentId);
+  const secondResponsePromise = page.waitForResponse((response) =>
+    response.url().endsWith("/v1/agent-packages/import") && response.request().method() === "POST",
+  );
+  await page.getByRole("button", { name: "校验、编译并激活" }).click();
+  expect((await secondResponsePromise).status()).toBe(201);
+  await expect(page.locator("#agent-revisions-body tr")).toHaveCount(2);
+  await expect(page.locator("#agent-revisions-body")).toContainText("Revision 2");
+
+  const firstRow = page.locator("#agent-revisions-body tr", { hasText: "Revision 1" });
+  const activateResponsePromise = page.waitForResponse((response) =>
+    response.url().endsWith("/activate") && response.request().method() === "POST",
+  );
+  await firstRow.getByRole("button", { name: "回滚到此版本" }).click();
+  expect((await activateResponsePromise).status()).toBe(200);
+  await expect(firstRow).toContainText("已激活");
 });

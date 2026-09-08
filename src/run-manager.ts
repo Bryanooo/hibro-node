@@ -39,6 +39,20 @@ import type { ArtifactSyncRecord, RunStore } from "./storage.ts";
 import { WorkspaceManager } from "./workspace-manager.ts";
 import { FileSettingsStore } from "./settings-store.ts";
 import { createId } from "./identity.ts";
+import {
+  AgentPackageManager,
+  readAgentPackage,
+  type AgentPackageBundle,
+  type InstalledAgentRevision,
+} from "./agent-package.ts";
+import {
+  eventCategory,
+  eventSeverity,
+  fallbackTraceContext,
+  sanitizeObservabilityPayload,
+  traceContextFromMetadata,
+} from "./observability.ts";
+import type { EngineManager } from "./engine-manager.ts";
 
 export interface RunManagerOptions {
   store: RunStore;
@@ -48,6 +62,8 @@ export interface RunManagerOptions {
   agents?: FileAgentRegistry | undefined;
   workspaces?: WorkspaceManager | undefined;
   settings?: FileSettingsStore | undefined;
+  packages?: AgentPackageManager | undefined;
+  engineManager?: EngineManager | undefined;
 }
 
 interface DoctorCache {
@@ -107,6 +123,8 @@ export class RunManager {
   readonly workspaces: WorkspaceManager;
   readonly engines: EngineRegistry;
   readonly settings: FileSettingsStore;
+  readonly packages: AgentPackageManager | undefined;
+  readonly engineManager: EngineManager | undefined;
   private readonly controllers = new Map<string, AbortController>();
   private readonly pendingApprovals = new Map<
     string,
@@ -124,6 +142,7 @@ export class RunManager {
   private readonly sequences = new Map<string, number>();
   private readonly sessions = new Map<string, string>();
   private readonly doctorCache = new Map<EngineType, DoctorCache>();
+  private readonly runtimeEnvironments = new Map<string, Record<string, string>>();
   private readonly events = new EventEmitter();
   private readonly coreRegistrations = new Map<string, AgentCoreRegistration>();
   private coreConnection: {
@@ -133,6 +152,7 @@ export class RunManager {
     connectedAt?: string | undefined;
     lastMessageAt?: string | undefined;
   } = { connected: false, status: "standalone" };
+  private shuttingDown = false;
 
   constructor(options: RunManagerOptions) {
     this.store = options.store;
@@ -148,6 +168,8 @@ export class RunManager {
       options.workspaces ?? new WorkspaceManager(resolve(this.store.rootDir, "agents"));
     this.settings =
       options.settings ?? new FileSettingsStore(join(this.store.rootDir, "settings.json"));
+    this.packages = options.packages;
+    this.engineManager = options.engineManager;
     this.events.setMaxListeners(100);
   }
 
@@ -157,6 +179,9 @@ export class RunManager {
     await this.settings.init();
     await this.recoverInterruptedRuns();
     await this.pruneExpiredHistory();
+    await this.workspaces.pruneOrphanRuns(
+      new Set((await this.store.list()).map((run) => run.id)),
+    );
     for (const run of await this.store.list()) {
       if (
         run.sessionId &&
@@ -172,11 +197,18 @@ export class RunManager {
     }
   }
 
-  async create(input: CreateRunInput): Promise<RunRecord> {
+  async create(
+    input: CreateRunInput,
+    runtime: { environment?: Record<string, string> } = {},
+  ): Promise<RunRecord> {
+    if (this.shuttingDown) throw new Error("Hibro Node is shutting down");
     this.validateInput(input);
     const settings = this.settings.get();
     const agent = this.resolveAgent(input);
     if (!agent.enabled) throw new Error(`Agent ${agent.id} is disabled`);
+    if (this.engineManager && !this.engineManager.isEnabled(agent.engine)) {
+      throw new Error(`Engine is disabled: ${agent.engine}`);
+    }
     const adapter = this.engines.get(agent.engine);
     if (!adapter) throw new Error(`Engine adapter is not available: ${agent.engine}`);
     this.reserveRunSlot(agent, settings.maxConcurrentRuns);
@@ -192,10 +224,12 @@ export class RunManager {
         ? { type: "local" as const, path: resolve(source.path) }
         : undefined;
       lease = await this.workspaces.acquire(agent, runId, normalizedSource);
+      await this.packages?.materialize(agent, lease.path);
       const artifactPath = join(this.workspaces.pathsFor(agent.id).artifacts, runId);
       await mkdir(artifactPath, { recursive: true, mode: 0o700 });
       lease.artifactPath = artifactPath;
       const now = new Date().toISOString();
+      const trace = traceContextFromMetadata(input.metadata);
       const sessionId =
         input.freshSession === true ||
         !settings.autoResumeSessions ||
@@ -218,6 +252,10 @@ export class RunManager {
           workspace: lease.path,
           options,
         },
+        ...(input.metadata?.origin && typeof input.metadata.origin === "object"
+          ? { origin: input.metadata.origin as NonNullable<RunRecord["origin"]> }
+          : {}),
+        trace,
         workspace: lease,
         createdAt: now,
         updatedAt: now,
@@ -231,6 +269,9 @@ export class RunManager {
         workspace: lease,
       });
       this.activeRuns.set(run.id, run);
+      if (runtime.environment && Object.keys(runtime.environment).length) {
+        this.runtimeEnvironments.set(run.id, { ...runtime.environment });
+      }
       void this.execute(run, adapter);
       return run;
     } catch (error) {
@@ -252,16 +293,15 @@ export class RunManager {
   }
 
   async listArtifacts(): Promise<ArtifactRecord[]> {
-    const artifacts: ArtifactRecord[] = [];
     for (const run of await this.store.list()) {
       if (run.status !== "completed") continue;
-      if (run.workspace?.artifactPath) {
-        artifacts.push(
-          ...(await this.scanArtifactDirectory(run, run.workspace.artifactPath)),
-        );
-      }
+      if (!run.workspace?.artifactPath || this.store.isArtifactIndexed(run.id)) continue;
+      this.store.replaceArtifacts(
+        run.id,
+        await this.scanArtifactDirectory(run, run.workspace.artifactPath),
+      );
     }
-    return artifacts
+    return this.store.listArtifacts()
       .map((artifact) => ({
         ...artifact,
         sync: this.artifactSyncState(artifact),
@@ -357,6 +397,7 @@ export class RunManager {
           .digest("hex")
           .slice(0, 32)}`,
         runId: run.id,
+        ...(run.origin ? { origin: run.origin } : {}),
         agentId: run.agentId,
         engine: run.engine,
         title: basename(path),
@@ -431,11 +472,79 @@ export class RunManager {
     if (this.workspaces.activeRunIds(agentId).length > 0) {
       throw new Error("Cannot delete an Agent while it is running");
     }
-    return this.agents.delete(agentId);
+    const deleted = await this.agents.delete(agentId);
+    if (deleted) await this.workspaces.purgeAgent(agentId);
+    return deleted;
+  }
+
+  async importAgentPackage(
+    path: string,
+    agentId?: string,
+  ): Promise<InstalledAgentRevision> {
+    if (!this.packages) throw new Error("Agent package manager is unavailable");
+    if (agentId && this.workspaces.activeRunIds(agentId).length > 0) {
+      throw new Error("Cannot import an Agent revision while it is running");
+    }
+    const existing = agentId ? this.agents?.get(agentId) : undefined;
+    const revisions = agentId ? await this.packages.list(agentId) : [];
+    return this.packages.deploy({
+      ...(agentId ? { agentId } : {}),
+      revision: Math.max(0, ...revisions.map((item) => item.revision)) + 1,
+      origin: "local",
+      bundle: await readAgentPackage(path),
+      ...(existing?.package?.definitionId
+        ? { definitionId: existing.package.definitionId }
+        : {}),
+    });
+  }
+
+  async deployAgentPackage(input: {
+    agentId?: string;
+    definitionId?: string;
+    revisionId?: string;
+    revision?: number;
+    expectedHash?: string;
+    origin: "local" | "hibro-core";
+    bundle: AgentPackageBundle;
+  }): Promise<InstalledAgentRevision> {
+    if (!this.packages) throw new Error("Agent package manager is unavailable");
+    if (input.agentId && this.workspaces.activeRunIds(input.agentId).length > 0) {
+      throw new Error("Cannot deploy an Agent revision while it is running");
+    }
+    return this.packages.deploy(input);
+  }
+
+  async activateAgentRevision(
+    agentId: string,
+    revisionId: string,
+  ): Promise<InstalledAgentRevision> {
+    if (!this.packages) throw new Error("Agent package manager is unavailable");
+    if (this.workspaces.activeRunIds(agentId).length > 0) {
+      throw new Error("Cannot activate an Agent revision while it is running");
+    }
+    return this.packages.activate(agentId, revisionId);
+  }
+
+  async listAgentRevisions(agentId?: string): Promise<InstalledAgentRevision[]> {
+    return this.packages?.list(agentId) ?? [];
   }
 
   activeRunCount(): number {
     return this.activeRuns.size;
+  }
+
+  async shutdown(timeoutMs = 15_000): Promise<void> {
+    this.shuttingDown = true;
+    for (const controller of this.controllers.values()) controller.abort();
+    for (const [key, approval] of this.pendingApprovals) {
+      this.pendingApprovals.delete(key);
+      approval.resolve("deny");
+    }
+    const deadline = Date.now() + timeoutMs;
+    while (this.activeRuns.size > 0 && Date.now() < deadline) {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+    }
+    await this.store.close();
   }
 
   clearDoctorCache(): void {
@@ -446,9 +555,40 @@ export class RunManager {
     const cutoff = new Date(
       now.getTime() - this.settings.get().eventRetentionDays * 24 * 60 * 60 * 1_000,
     );
+    const candidates = new Map(
+      (await this.store.list()).map((run) => [run.id, run] as const),
+    );
     const removed = await this.store.pruneTerminalRunsBefore(cutoff);
+    await Promise.all(
+      removed.map((runId) => {
+        const agentId = candidates.get(runId)?.agentId;
+        return agentId
+          ? this.workspaces.purgeRun(agentId, runId)
+          : Promise.resolve();
+      }),
+    );
     this.store.pruneProtocolHistory(cutoff);
     return removed;
+  }
+
+  async healthCheck(): Promise<{
+    status: "ready" | "degraded";
+    database: { ok: boolean; detail: string; pendingMessages: number; deadMessages: number };
+    activeRuns: number;
+    shuttingDown: boolean;
+  }> {
+    const database = await this.store.healthCheck().catch((error) => ({
+      ok: false,
+      detail: error instanceof Error ? error.message : String(error),
+      pendingMessages: -1,
+      deadMessages: -1,
+    }));
+    return {
+      status: database.ok && !this.shuttingDown ? "ready" : "degraded",
+      database,
+      activeRuns: this.activeRuns.size,
+      shuttingDown: this.shuttingDown,
+    };
   }
 
   async listAgents(): Promise<AgentRuntime[]> {
@@ -530,11 +670,31 @@ export class RunManager {
 
   async doctorEngines(): Promise<Array<{ id: EngineType; doctor: EngineDoctorResult }>> {
     return Promise.all(
-      this.engines.list().map(async (adapter) => ({
-        id: adapter.engineType,
-        doctor: await this.cachedDoctor(adapter),
-      })),
+      this.engines.list().map(async (adapter) => {
+        const lifecycle = this.engineManager?.get(adapter.engineType);
+        if (lifecycle && !lifecycle.enabled) {
+          const detected = await this.cachedDoctor(adapter);
+          return {
+            id: adapter.engineType,
+            doctor: {
+              ...detected,
+              ready: false,
+              error: "Engine is disabled by Node policy",
+              management: lifecycle,
+            },
+          };
+        }
+        const doctor = await this.cachedDoctor(adapter);
+        return {
+          id: adapter.engineType,
+          doctor: { ...doctor, ...(lifecycle ? { management: lifecycle } : {}) },
+        };
+      }),
     );
+  }
+
+  isEngineBusy(engine: EngineType): boolean {
+    return [...this.activeRuns.values()].some((run) => run.engine === engine);
   }
 
   async eventsAfter(runId: string, sequence = 0): Promise<RunEvent[]> {
@@ -578,7 +738,15 @@ export class RunManager {
   ): Promise<void> {
     const key = `${runId}:${externalId}`;
     const pending = this.pendingApprovals.get(key);
-    if (!pending) throw new Error("Approval is no longer pending");
+    if (!pending) {
+      const previous = (await this.store.getEvents(runId)).find(
+        (event) =>
+          event.type === "engine.approval.resolved" &&
+          event.payload.externalId === externalId,
+      );
+      if (previous?.payload.decision === decision) return;
+      throw new Error("Approval is no longer pending");
+    }
     const supported = pending.request.decisions ?? [
       "allow_once",
       "allow_always",
@@ -645,6 +813,7 @@ export class RunManager {
             : run.request.options?.sessionId ??
               `hibro-${run.request.sessionKey || "default"}`,
         options: run.request.options,
+        environment: this.runtimeEnvironments.get(run.id),
         signal: controller.signal,
         requestApproval: (request) => this.requestApproval(run, request, controller.signal),
         onEvent: (type, payload) => {
@@ -697,6 +866,7 @@ export class RunManager {
         error: run.error,
       });
     } finally {
+      this.runtimeEnvironments.delete(run.id);
       for (const [key, approval] of this.pendingApprovals) {
         if (approval.runId !== run.id) continue;
         this.pendingApprovals.delete(key);
@@ -844,12 +1014,22 @@ export class RunManager {
     }
     sequence += 1;
     this.sequences.set(runId, sequence);
+    const run = await this.store.get(runId);
+    const trace = run?.trace ?? fallbackTraceContext(runId);
+    const category = eventCategory(type);
     const event: RunEvent = {
       runId,
       sequence,
       type,
       timestamp: new Date().toISOString(),
-      payload,
+      traceId: trace.traceId,
+      spanId: sequence === 1 ? trace.rootSpanId : createId("span"),
+      ...(sequence === 1
+        ? trace.parentSpanId ? { parentSpanId: trace.parentSpanId } : {}
+        : { parentSpanId: trace.rootSpanId }),
+      category,
+      severity: eventSeverity(type),
+      payload: sanitizeObservabilityPayload(payload),
     };
     await this.store.appendEvent(event);
     this.events.emit(runId, event);

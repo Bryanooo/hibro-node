@@ -1,6 +1,8 @@
 import { readdir } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
+import { Script } from "node:vm";
+import { CONSOLE_JS } from "../src/console-assets.ts";
 
 async function collect(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -28,5 +30,5 @@ for (const directory of ["src", "test", "scripts"]) {
     await check(path);
   }
 }
+new Script(CONSOLE_JS, { filename: "console/app.js" });
 process.stdout.write("Syntax check passed\n");
-

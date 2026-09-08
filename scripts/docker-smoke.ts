@@ -106,7 +106,14 @@ async function main(): Promise<void> {
   try {
     if (!suppliedImage) {
       process.stdout.write(`构建临时镜像 ${image}\n`);
-      await command("docker", ["build", "--tag", image, "."], { showOutput: true });
+      const buildArgs: string[] = [];
+      for (const [name, value] of [
+        ["DEBIAN_MIRROR", process.env.HIBRO_DEBIAN_MIRROR],
+        ["NPM_REGISTRY", process.env.HIBRO_NPM_REGISTRY],
+      ] as const) {
+        if (value) buildArgs.push("--build-arg", `${name}=${value}`);
+      }
+      await command("docker", ["build", ...buildArgs, "--tag", image, "."], { showOutput: true });
     }
     await command("docker", ["volume", "create", volume]);
     volumeCreated = true;
@@ -136,6 +143,19 @@ async function main(): Promise<void> {
     assert.equal(system.dataDir, "/data/.hibro");
     assert.equal(system.storage.engine, "sqlite");
     assert.equal(system.storage.databasePath, "/data/.hibro/hibro.db");
+
+    const engines = await json<{
+      engines: Array<{
+        id: string;
+        installed: boolean;
+        source: string;
+        runtimeVersion?: string;
+      }>;
+    }>(`${baseURL}/v1/engines`);
+    assert.equal(engines.engines.length, 3);
+    assert.ok(engines.engines.every((engine) => engine.installed));
+    assert.ok(engines.engines.every((engine) => engine.source === "bundled"));
+    assert.ok(engines.engines.every((engine) => Boolean(engine.runtimeVersion)));
 
     const agents = await json<{
       agents: Array<{ agent: { id: string; engine: string; source?: unknown } }>;

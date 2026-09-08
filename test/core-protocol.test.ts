@@ -14,6 +14,43 @@ test("Core protocol creates and parses a versioned envelope", () => {
   );
   assert.equal(message.protocol, HIBRO_CORE_PROTOCOL);
   assert.equal(parseCoreEnvelope(message).type, "run.cancel");
+
+  const deployment = createCoreEnvelope(
+    "agent.revision.deploy",
+    {
+      deploymentId: "deployment-1",
+      definitionId: "definition-1",
+      revisionId: "revision-1",
+      agentId: "agent-1",
+      revision: 1,
+      contentHash: "sha256:test",
+      bundle: {
+        manifest: {
+          apiVersion: "hibro.ai/v1alpha1",
+          kind: "Agent",
+          metadata: { name: "Researcher", slug: "researcher-agent" },
+          spec: { engine: "codex", instructions: "instructions.md" },
+        },
+        files: { "instructions.md": "Research carefully." },
+      },
+    },
+    { nodeId: "node-1", sequence: 8, requiresAck: true },
+  );
+  assert.equal(parseCoreEnvelope(deployment).type, "agent.revision.deploy");
+
+  const status = createCoreEnvelope(
+    "agent.deployment.status",
+    {
+      deploymentId: "deployment-1",
+      definitionId: "definition-1",
+      revisionId: "revision-1",
+      agentId: "agent-1",
+      status: "active",
+      observedAt: new Date().toISOString(),
+    },
+    { nodeId: "node-1", sequence: 9 },
+  );
+  assert.equal(parseCoreEnvelope(status).type, "agent.deployment.status");
 });
 
 test("Core protocol rejects unknown versions, types and invalid sequences", () => {

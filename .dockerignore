@@ -4,5 +4,7 @@ node_modules
 npm-debug.log
 .DS_Store
 test
-scripts
+scripts/*
+!scripts/backup-database.ts
+!scripts/restore-database.ts
 *.local

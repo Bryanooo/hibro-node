@@ -24,6 +24,13 @@ export const TEST_SUITES: readonly TestSuiteDefinition[] = [
     description: "Agent 运行时、引擎状态和工作空间",
   },
   {
+    id: "runtime.agent-package",
+    file: "agent-package.test.ts",
+    layer: "integration",
+    area: "runtime",
+    description: "Agent as Code 校验、确定性编译、激活与回滚",
+  },
+  {
     id: "engine.claude",
     file: "claude-code-adapter.test.ts",
     layer: "integration",
@@ -36,6 +43,13 @@ export const TEST_SUITES: readonly TestSuiteDefinition[] = [
     layer: "integration",
     area: "engine",
     description: "Codex App Server 协议与审批",
+  },
+  {
+    id: "engine.lifecycle",
+    file: "engine-manager.test.ts",
+    layer: "integration",
+    area: "engine",
+    description: "引擎白名单、按需安装、启停、升级回滚与持久化",
   },
   {
     id: "config.node",
@@ -92,6 +106,13 @@ export const TEST_SUITES: readonly TestSuiteDefinition[] = [
     layer: "integration",
     area: "engine",
     description: "OpenClaw 适配器协议",
+  },
+  {
+    id: "observability.trace",
+    file: "observability.test.ts",
+    layer: "integration",
+    area: "observability",
+    description: "Trace 贯通、事件脱敏、指标与引擎 Provider 边界",
   },
   {
     id: "runtime.manager",

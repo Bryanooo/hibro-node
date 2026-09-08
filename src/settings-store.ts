@@ -29,12 +29,13 @@ export class FileSettingsStore {
   }
 
   async update(input: Partial<SystemSettings>): Promise<SystemSettings> {
-    this.settings = this.validate({
+    const next = this.validate({
       ...this.settings,
       ...input,
       updatedAt: new Date().toISOString(),
     });
-    await this.persist();
+    await writeJsonAtomically(this.path, next);
+    this.settings = next;
     return this.get();
   }
 

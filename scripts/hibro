@@ -13,6 +13,7 @@ Hibro 运维命令
   hibro restart [core|node|all]
   hibro logs [core|node] [--follow]
   hibro version [core|node|all]
+  hibro node engine list|install|update|activate|enable|disable|uninstall [ENGINE] [--version X.Y.Z]
 
 也可以把组件写在前面，例如：hibro core status。
 不指定组件时，status、version、update 和 restart 会处理本机已安装的组件。
@@ -46,7 +47,7 @@ if (($# > 0)); then
 fi
 
 case "${action}" in
-  status|update|restart|logs|version) ;;
+  status|update|restart|logs|version|engine) ;;
   help|-h|--help)
     usage
     exit 0
@@ -57,6 +58,9 @@ esac
    "${component}" == "all" ]] || fail "未知组件：${component}"
 if [[ "${action}" == "logs" && "${component}" == "all" ]]; then
   fail "查看日志时请指定 core 或 node。"
+fi
+if [[ "${action}" == "engine" && "${component}" != "node" ]]; then
+  fail "引擎管理只属于 Hibro Node，请使用 hibro node engine ..."
 fi
 
 user_data_home="${XDG_DATA_HOME:-${HOME}/.local/share}"
@@ -221,6 +225,63 @@ show_logs() {
   fi
 }
 
+manage_engine() {
+  configure_component node
+  local mode container env_file node_port node_binary operation engine version base_url
+  operation="${1:-list}"
+  (($# == 0)) || shift
+  case "${operation}" in
+    list) ;;
+    install|update|activate|enable|disable|uninstall)
+      engine="${1:-}"
+      [[ "${engine}" == "claude-code" || "${engine}" == "codex" || "${engine}" == "openclaw" ]] ||
+        fail "引擎必须是 claude-code、codex 或 openclaw。"
+      shift
+      ;;
+    *) fail "未知引擎操作：${operation}" ;;
+  esac
+  version=""
+  if [[ "${1:-}" == "--version" ]]; then
+    version="${2:-}"
+    [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9][A-Za-z0-9.-]*)?$ ]] ||
+      fail "--version 必须是精确版本号。"
+    shift 2
+  fi
+  (($# == 0)) || fail "多余的引擎参数：$*"
+  mode="$(read_state_value "${state_file}" MODE)"
+  if [[ "${mode}" == "docker" ]]; then
+    container="$(find_container)"
+    [[ -n "${container}" ]] || fail "未找到 ${display_name} 容器。"
+    node_binary=(docker exec "${container}" node)
+    base_url="http://127.0.0.1:7331"
+  elif [[ "${mode}" == "native" ]]; then
+    env_file="${HIBRO_NODE_RUNTIME_ENV_FILE:-/etc/hibro-node/hibro-node.env}"
+    node_port=""
+    if [[ -f "${env_file}" ]]; then
+      node_port="$(awk -F= '$1 == "HIBRO_NODE_PORT" { sub(/^[^=]*=/, ""); print; exit }' "${env_file}")"
+    fi
+    [[ "${node_port}" =~ ^[0-9]+$ ]] || fail "无法从 ${env_file} 读取 HIBRO_NODE_PORT。"
+    node_binary=("$(command -v node)")
+    base_url="http://127.0.0.1:${node_port}"
+  else
+    fail "${display_name} 的部署模式未知。"
+  fi
+  "${node_binary[@]}" -e '
+    const [base, action, id, version] = process.argv.slice(1);
+    const url = action === "list" ? `${base}/v1/engines` : `${base}/v1/engines/${id}/${action}`;
+    const options = action === "list" ? undefined : {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(version ? { version } : {}),
+    };
+    fetch(url, options).then(async (response) => {
+      const body = await response.text();
+      process.stdout.write(body.endsWith("\n") ? body : `${body}\n`);
+      if (!response.ok) process.exitCode = 1;
+    }).catch((error) => { console.error(error.message); process.exitCode = 1; });
+  ' "${base_url}" "${operation}" "${engine:-}" "${version}"
+}
+
 selected_components=()
 if [[ "${component}" == "all" ]]; then
   is_installed core && selected_components+=(core)
@@ -248,5 +309,8 @@ case "${action}" in
     ;;
   logs)
     show_logs "${component}" "$@"
+    ;;
+  engine)
+    manage_engine "$@"
     ;;
 esac

@@ -54,6 +54,29 @@ test("persists a successful run and ordered events", async () => {
   assert.equal(events.at(-1)?.type, "run.completed");
 });
 
+test("passes Project secrets ephemerally without persisting their values", async () => {
+  let observedSecret: string | undefined;
+  class SecretAdapter implements AgentEngineAdapter {
+    readonly engineType = "claude-code" as const;
+    async doctor() { return { installed: true, ready: true }; }
+    async execute(input: EngineExecuteInput) {
+      observedSecret = input.environment?.MARKET_API_TOKEN;
+      return { result: "secret accepted" };
+    }
+  }
+  const root = await mkdtemp(join(tmpdir(), "hibro-runtime-secret-"));
+  const instance = new RunManager({ adapter: new SecretAdapter(), store: new FileRunStore(root) });
+  await instance.init();
+  const created = await instance.create(
+    { prompt: "analyze", workspace: process.cwd() },
+    { environment: { MARKET_API_TOKEN: "runtime-only-secret" } },
+  );
+  await instance.waitForTerminal(created.id);
+  assert.equal(observedSecret, "runtime-only-secret");
+  assert.doesNotMatch(JSON.stringify(await instance.list()), /runtime-only-secret/);
+  assert.doesNotMatch(JSON.stringify(await instance.eventsAfter(created.id)), /runtime-only-secret/);
+});
+
 test("cancels an active run", async () => {
   const instance = await manager();
   const created = await instance.create({
@@ -437,8 +460,24 @@ test("collects text and binary deliverables from the isolated artifact directory
   const run = await instance.create({
     prompt: "create artifacts",
     workspace: process.cwd(),
+    metadata: {
+      origin: {
+        kind: "team",
+        projectId: "project_artifacts",
+        teamId: "team_artifacts",
+        teamRunId: "teamrun_artifacts",
+        teamStepId: "teamstep_artifacts",
+        collaborationSessionId: "teamrun_artifacts",
+        collaborationMode: "debate",
+        collaborationRound: 2,
+        automationId: "automation_artifacts",
+      },
+    },
   });
-  await instance.waitForTerminal(run.id);
+  const terminal = await instance.waitForTerminal(run.id);
+  assert.equal(terminal.origin?.teamRunId, "teamrun_artifacts");
+  assert.equal(terminal.origin?.collaborationMode, "debate");
+  assert.equal(terminal.origin?.collaborationRound, 2);
   const artifacts = (await instance.listArtifacts()).filter(
     (artifact) => artifact.runId === run.id,
   );
@@ -462,6 +501,8 @@ test("collects text and binary deliverables from the isolated artifact directory
   assert.ok(video?.localPath);
   assert.equal(video?.content, undefined);
   assert.ok(artifacts.every((artifact) => artifact.sync?.status === "local_only"));
+  assert.ok(artifacts.every((artifact) => artifact.origin?.automationId === "automation_artifacts"));
+  assert.ok(artifacts.every((artifact) => artifact.origin?.collaborationSessionId === "teamrun_artifacts"));
 
   await instance.updateSettings({
     coreEnabled: true,

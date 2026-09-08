@@ -18,6 +18,8 @@ export interface NodeDataLayout {
   settings: string;
   agentsRegistry: string;
   agentsRoot: string;
+  agentPackagesRoot: string;
+  enginesRoot: string;
 }
 
 export function nodeDataLayout(homeDir: string): NodeDataLayout {
@@ -28,6 +30,8 @@ export function nodeDataLayout(homeDir: string): NodeDataLayout {
     settings: join(root, "settings.json"),
     agentsRegistry: join(root, "agents.json"),
     agentsRoot: join(root, "agents"),
+    agentPackagesRoot: join(root, "agents"),
+    enginesRoot: join(root, "engines"),
   };
 }
 

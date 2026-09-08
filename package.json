@@ -11,6 +11,9 @@
     "start": "node --experimental-strip-types src/cli.ts serve",
     "dev": "node --experimental-strip-types --watch src/cli.ts serve",
     "doctor": "node --experimental-strip-types src/cli.ts doctor",
+    "engine": "node --experimental-strip-types src/cli.ts engine",
+    "backup": "node --experimental-strip-types scripts/backup-database.ts",
+    "restore": "node --experimental-strip-types scripts/restore-database.ts",
     "run": "node --experimental-strip-types src/cli.ts run",
     "test": "node --experimental-strip-types scripts/test-runner.ts",
     "test:unit": "node --experimental-strip-types scripts/test-runner.ts --layer unit",
@@ -26,7 +29,8 @@
     "release:package": "bash scripts/package-release.sh"
   },
   "dependencies": {
-    "ws": "^8.18.3"
+    "ws": "^8.18.3",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.0",

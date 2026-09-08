@@ -34,6 +34,25 @@ Node 负责：
 Core 负责 Team、跨节点路由、策略和全局产出索引。Node 可独立运行，也可以主动通过
 `hibro.node.v1` WebSocket 连接 Hibro Core。
 
+## Agent as Code
+
+Node 支持从源码目录导入可版本化 Agent。最小目录：
+
+```text
+equity-research/
+├── agent.yaml
+├── instructions.md
+└── skills/
+    └── evidence/
+        └── SKILL.md
+```
+
+`agent.yaml` 使用 `apiVersion: hibro.ai/v1alpha1` 和 `kind: Agent`。可在控制台的
+“Agent 源码”页面导入，也可以调用 `POST /v1/agent-packages/import`。Node 会为 Codex
+生成 `AGENTS.md` 与 `.agents/skills`，为 Claude Code 生成 `CLAUDE.md` 与
+`.claude/skills`；源码目录不会被修改。所有源码、编译结果和激活记录位于
+`.hibro/agents/<agent-id>/definition`，历史 Revision 可直接回滚。
+
 ## ID 与默认 Agent
 
 所有新业务 ID 都使用统一的“类型前缀 + 标准 UUID”格式，例如
@@ -126,7 +145,7 @@ Agent 长期使用的 `workspace/`。这让同一个 Agent 可以先做普通问
 
 ## 快速开始
 
-要求 Node.js 24 或更高版本，并至少安装一种引擎：
+要求 Node.js 24 或更高版本。引擎可以预装，也可以稍后在“引擎管理”中按需安装：
 
 - Claude Code CLI
 - Codex CLI
@@ -150,6 +169,7 @@ Node「系统配置」中填写 Core URL 和该注册码。Core 接受注册后�
 - 总览：Agent、活动运行、成功率、引擎状态和快速操作
 - Agents：搜索、新建、编辑、启停、删除和直接运行
 - Agent 对话：直接聊天，并查看思考摘要、工具调用、工具结果和审批项
+- 观测中心：查看本机 Trace、结构化事件、工具/审批/错误统计，并下钻到 Run 和产物
 - 运行：按 Agent/状态筛选，查看结果、事件与原始请求，取消或再次运行
 - 产出：搜索、复制和下载已完成运行的 Markdown 结果
 - 工作空间：查看目录策略、权限、活动租约和最近使用时间
@@ -176,7 +196,8 @@ Docker Compose 时选择 Native，否则选择 Docker。Node 不要求配置 Cor
 并校验 latest 版本。高级场景可使用 `--source release`、`--mode docker|native` 或
 `--version vX.Y.Z`。
 
-脚本依次确认本机访问端口和 Agent 初始项目目录，随后创建权限为 `600` 的环境文件、
+可通过 `--engines all|none|claude-code,codex,openclaw` 选择镜像或 Native 首次安装的
+引擎；默认 `all`。脚本依次确认本机访问端口和 Agent 初始项目目录，随后创建权限为 `600` 的环境文件、
 构建镜像、启动服务并执行健康检查。它不会要求 Core 地址或注册码；需要接入 Core 时，
 在 Node 控制台的“系统配置”中填写即可。
 
@@ -198,6 +219,8 @@ hibro node status
 hibro node update
 hibro node restart
 hibro node logs
+hibro node engine list
+hibro node engine install codex
 ```
 
 同一台机器安装了 Core 时可使用 `hibro core ...`；`hibro status` 会汇总本机组件。
@@ -219,6 +242,9 @@ CLI 登录信息归服务用户所有。Node 始终只监听 `127.0.0.1`，不�
 ```bash
 curl http://127.0.0.1:7331/v1/agents
 curl http://127.0.0.1:7331/v1/capabilities
+curl http://127.0.0.1:7331/v1/observability/overview
+curl http://127.0.0.1:7331/v1/observability/traces
+curl http://127.0.0.1:7331/v1/extensions
 curl http://127.0.0.1:7331/v1/protocol
 ```
 
@@ -353,6 +379,19 @@ Agent 明确写入当前 Run 产物目录的文件才会出现在产物页面和
 早期版本的 `/data/.hibro + /data/agents`、`~/.hibro-node` 和嵌套 Agent `.hibro`
 目录会在启动时自动合并。迁移不会覆盖已经存在的新目录，并会修复 Git worktree 的
 仓库与工作空间指针。
+
+Node 启动时以及此后每 24 小时会创建经过完整性校验的 SQLite 快照，默认保留最近
+14 份。手工备份与恢复命令如下；恢复前必须先停止 Node，恢复时会自动保留当前数据库
+的 `pre-restore-node-*` 安全快照：
+
+```bash
+npm run backup
+npm run restore -- /path/to/hibro-node-backup.db --confirm-stopped
+```
+
+恢复后启动 Node，并确认 `/ready` 返回 200。文件产物和 Agent 工作空间不在 SQLite
+文件中，灾难恢复时仍需一并备份整个 Hibro Home。
+
 这个混合方案适合单机 Hibro Node；只有未来让多个 Node 实例共享同一运行数据库时，
 才需要考虑 PostgreSQL 等外部数据库。设计决策见
 [`docs/adr-0001-sqlite-storage.md`](docs/adr-0001-sqlite-storage.md)。
@@ -376,8 +415,9 @@ Shell 环境导入只接受 Claude/API Provider 所需的变量白名单；日�
 
 ## Docker
 
-镜像构建时会在镜像内全新安装并固定 Claude Code `2.1.218`、Codex CLI `0.145.0`
-和 OpenClaw `2026.7.1-2`，不会直接使用宿主机上的 CLI 安装。默认映射到宿主机
+默认镜像构建时会在镜像内全新安装并固定 Claude Code `2.1.218`、Codex CLI `0.145.0`
+和 OpenClaw `2026.7.1-2`；也可用 `--engines` 构建子集或空白镜像，之后在控制台按需
+安装到持久化 Hibro Home。镜像不会直接使用宿主机上的 CLI 安装。默认映射到宿主机
 `17332` 端口，使用 `hibro-node-data` 保存配置、运行、事件和工作空间，并将当前项目
 挂载到 `/workspace/project`。
 
@@ -406,6 +446,9 @@ docker logs hibro-node-local
 npm run validate
 npm run smoke:claude
 ```
+
+引擎安装、升级、启停、回滚边界和 Core 调度语义见
+[`docs/engine-lifecycle.md`](docs/engine-lifecycle.md)。
 
 `validate` 会执行严格 TypeScript 检查、语法检查和自动化测试。运行时使用 Node.js
 原生 TypeScript type stripping，没有生产依赖。

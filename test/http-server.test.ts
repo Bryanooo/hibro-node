@@ -9,21 +9,27 @@ import { createHibroHttpServer, listen } from "../src/http-server.ts";
 import { RunManager } from "../src/run-manager.ts";
 import { FileRunStore } from "../src/storage.ts";
 import { WorkspaceManager } from "../src/workspace-manager.ts";
+import { AgentPackageManager } from "../src/agent-package.ts";
+import { EngineManager } from "../src/engine-manager.ts";
 
 const executable = resolve("test/fixtures/fake-claude.mjs");
 await chmod(executable, 0o755);
 
 test("HTTP API creates and returns a run", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "hibro-node-http-test-"));
+  const engineManager = new EngineManager(join(root, "engines"));
+  await engineManager.init();
   const manager = new RunManager({
     adapter: new ClaudeCodeAdapter({ executable }),
     store: new FileRunStore(root),
+    engineManager,
   });
   await manager.init();
   const server = createHibroHttpServer({
     host: "127.0.0.1",
     port: 0,
     manager,
+    engineManager,
   });
   context.after(() => server.close());
   const address = await listen(server, "127.0.0.1", 0);
@@ -66,6 +72,37 @@ test("HTTP API creates and returns a run", async (context) => {
   assert.match(consoleScript, /events\?format=json/);
   assert.match(consoleScript, /默认项目（只用于创建工作副本）/);
   assert.match(consoleScript, /Agent 专属空间（实际工作位置）/);
+  assert.match(consoleScript, /performEngineAction/);
+
+  const engineCatalogResponse = await fetch(`${base}/v1/engines`);
+  assert.equal(engineCatalogResponse.status, 200);
+  const engineCatalog = (await engineCatalogResponse.json()) as {
+    engines: Array<{ id: string; recommendedVersion?: string; enabled?: boolean }>;
+    policy: { exactVersionsOnly: boolean };
+  };
+  assert.equal(engineCatalog.engines.length, 3);
+  assert.equal(engineCatalog.engines.find((engine) => engine.id === "claude-code")?.enabled, true);
+  assert.equal(engineCatalog.policy.exactVersionsOnly, true);
+
+  const disableEngine = await fetch(`${base}/v1/engines/claude-code/disable`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  });
+  assert.equal(disableEngine.status, 200);
+  assert.equal(((await disableEngine.json()) as { status: string }).status, "disabled");
+  const disabledRun = await fetch(`${base}/v1/runs`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "must not start", workspace: process.cwd() }),
+  });
+  assert.equal(disabledRun.status, 400);
+  assert.match(await disabledRun.text(), /Engine is disabled/);
+  await fetch(`${base}/v1/engines/claude-code/enable`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  });
 
   const brand = await fetch(`${base}/console/hibro-mark.png`);
   assert.equal(brand.status, 200);
@@ -159,6 +196,7 @@ test("Agent API generates IDs, exposes private paths and reports Core registrati
     store: new FileRunStore(root),
     agents: registry,
     workspaces: new WorkspaceManager(join(root, "agents")),
+    packages: new AgentPackageManager(join(root, "agents"), registry),
   });
   await manager.init();
   const server = createHibroHttpServer({
@@ -194,6 +232,30 @@ test("Agent API generates IDs, exposes private paths and reports Core registrati
   );
   assert.notEqual(created.id, "client-supplied-id-is-ignored");
   assert.equal(created.approvalPolicy, "workspace");
+
+  await writeFile(
+    join(source, "agent.yaml"),
+    `apiVersion: hibro.ai/v1alpha1\nkind: Agent\nmetadata:\n  name: API Package Reviewer\n  slug: api-package-reviewer\nspec:\n  engine: claude-code\n  instructions: instructions.md\n  workspace:\n    strategy: persistent\n    access: read-only\n`,
+  );
+  await writeFile(join(source, "instructions.md"), "Review carefully.\n");
+  const packageResponse = await fetch(`${base}/v1/agent-packages/import`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ path: source, agentId: created.id }),
+  });
+  assert.equal(packageResponse.status, 201);
+  const packageResult = (await packageResponse.json()) as {
+    revision: { agentId: string; status: string; contentHash: string };
+    agent: { package: { revision: number } };
+  };
+  assert.equal(packageResult.revision.agentId, created.id);
+  assert.equal(packageResult.revision.status, "active");
+  assert.equal(packageResult.agent.package.revision, 1);
+  const revisionsResponse = await fetch(`${base}/v1/agent-revisions?agentId=${created.id}`);
+  assert.equal(revisionsResponse.status, 200);
+  const revisions = (await revisionsResponse.json()) as { revisions: Array<{ contentHash: string }> };
+  assert.equal(revisions.revisions.length, 1);
+  assert.equal(revisions.revisions[0]?.contentHash, packageResult.revision.contentHash);
 
   const clearedResponse = await fetch(`${base}/v1/agents/${created.id}`, {
     method: "PUT",

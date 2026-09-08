@@ -162,6 +162,8 @@ test("Node remote installer installs and upgrades verified releases", () => {
     "v1.0.0",
     "--project-root",
     root,
+    "--engines",
+    "codex",
   ]);
   assert.equal(install.status, 0, install.stderr);
   assert.match(install.stdout, /1\.0\.0 已安装完成/);
@@ -183,6 +185,7 @@ test("Node remote installer installs and upgrades verified releases", () => {
     /VERSION=1\.1\.0/,
   );
   assert.match(readFileSync(join(root, "setup.log"), "utf8"), /--mode docker/);
+  assert.match(readFileSync(join(root, "setup.log"), "utf8"), /--engines codex/);
 });
 
 test("Node remote installer rejects an invalid release checksum", () => {

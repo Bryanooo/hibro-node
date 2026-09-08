@@ -1,6 +1,6 @@
 # Hibro Core ↔ Hibro Node Protocol v1
 
-Status: Implementable specification  
+Status: Implemented v1 contract
 Protocol identifier: `hibro.node.v1`  
 Canonical transport: outbound secure WebSocket (`wss`)  
 Large artifact transfer: object-storage presigned upload (v1)  
@@ -35,8 +35,10 @@ Requirements:
 - Core must validate the Node token before accepting application messages.
 - The token identifies one Core-side Node record and can be rotated independently.
 - Core should reject frames larger than the negotiated `maxFrameBytes`.
-- Default maximum frame size is 1 MiB.
-- Artifact chunks must stay below the negotiated frame limit.
+- Default maximum frame size is 2 MiB. Agent source bundles are limited to 768 KiB of
+  normalized text so JSON escaping and envelope metadata remain within this bound.
+- New artifacts never use WebSocket chunks. During rolling upgrades, a legacy
+  `artifact.upload` chunk must remain below the negotiated frame limit.
 
 ## 3. Envelope
 
@@ -107,6 +109,7 @@ The first application frame sent by Node. It includes:
 - process-unique `instanceId`;
 - Node version, platform and architecture;
 - installed engine capabilities and versions;
+- engine lifecycle state (`installed`, `enabled`, runtime version, managed version and readiness);
 - supported protocol versions;
 - optional resume token and last received sequences.
 
@@ -160,6 +163,8 @@ Message types:
 - `agent.upsert`: Core or Node proposes a complete Agent definition and revision.
 - `agent.delete`: removes a Core-managed assignment; local history remains.
 - `agent.registration`: registration result emitted by Core.
+- `agent.revision.deploy`: Core sends an immutable Agent package to a target local Agent ID.
+- `agent.deployment.status`: Node reports `installing`, `active` or `failed` for one Deployment.
 
 Conflict rules:
 
@@ -182,6 +187,31 @@ This is only the Agent's default project. Its absence means the Agent starts in 
 private workspace; it does not make the Agent invalid or unavailable. Core stores this field as
 opaque Node-local configuration and must not assume it can access the path.
 
+### Agent as Code deployment
+
+An Agent package contains a validated `hibro.ai/v1alpha1` manifest plus normalized text files.
+Core stores three different records:
+
+- Definition: stable user-owned Agent identity and slug;
+- Revision: immutable package, monotonically increasing revision number and SHA-256;
+- Deployment: desired Revision on one Node and its observed status.
+
+`agent.revision.deploy` contains `deploymentId`, `definitionId`, target local `agentId`,
+`revisionId`, revision number, content hash and the package. It always uses a Core outbox record,
+`requiresAck=true` and a Deployment-scoped idempotency key. An offline Node receives the same
+command when it reconnects.
+
+Node validates the package and expected hash before writing it. It compiles into a staging
+directory and only then changes the active pointer. Codex receives `AGENTS.md` and
+`.agents/skills`; Claude Code receives `CLAUDE.md` and `.claude/skills`; OpenClaw receives
+`AGENTS.md` and `.openclaw/skills`. Source directories are never modified.
+
+Node emits `agent.deployment.status=installing` before compilation and exactly one terminal
+observation (`active` or `failed`). Replayed terminal messages are idempotent. Core never lets an
+older delayed `active` event replace a newer pending or active Deployment. A failed Deployment
+does not change the previous active Revision. Rollback creates a new Deployment targeting an old
+Revision; it never mutates Revision history.
+
 ## 7. Run lifecycle
 
 ```mermaid
@@ -199,12 +229,45 @@ stateDiagram-v2
 
 ### `run.create`
 
+`request.metadata.origin` carries the durable business correlation for a Run. Node persists it on both the Run and every discovered Artifact, then returns it unchanged in snapshots and artifact manifests:
+
+```json
+{
+  "kind": "team",
+  "projectId": "project_...",
+  "teamId": "team_...",
+  "teamRunId": "teamrun_...",
+  "teamStepId": "teamstep_...",
+  "collaborationSessionId": "teamrun_...",
+  "collaborationMode": "facilitated_discussion",
+  "collaborationRound": 2,
+  "automationId": "automation_..."
+}
+```
+
+`kind` is one of `direct`, `conversation`, `automation`, or `team`. Optional identifiers that do not apply are omitted. This addition is backward-compatible within protocol v1.
+`collaborationSessionId` intentionally equals the compatible Team Run id in v1. Node does not interpret the collaboration mode; it preserves the fields so local Runs and Artifacts can be traced back to the Core session and round.
+
+`request.metadata.trace` carries the Core-generated Trace context:
+
+```json
+{
+  "traceId": "trace_3f6f0db0-...",
+  "rootSpanId": "span_1d12d952-...",
+  "parentSpanId": "span_team_step_..."
+}
+```
+
+Node persists this context in its Run record and returns it in snapshots. A direct local Run generates the same fields on Node. Older Runs without this field receive a deterministic fallback Trace ID derived from their Run ID.
+
 Core sends a durable, acknowledged command containing:
 
 - `commandId`;
 - requester identity and source;
 - target local `agentId`;
 - ordinary `CreateRunInput`, including an optional Run-level local `source`;
+- optional public Project context in `request.metadata` (Project ID and data-source IDs);
+- optional `environment`, containing Project secrets for this single execution;
 - optional deadline.
 
 Core must set an `idempotencyKey`. Node stores the command before starting the engine. Repeated
@@ -216,6 +279,13 @@ the Agent defines a source, Node executes in the Agent's empty private workspace
 may only send a local path that the Node operator has exposed and approved; v1 does not grant
 Core arbitrary filesystem access.
 
+`environment` is an ephemeral delivery field, not Run metadata. Core encrypts Project secrets at
+rest and only materializes plaintext immediately before WebSocket delivery. Node validates key
+names, rejects runtime-reserved variables, limits the field to 64 values / 16 KiB per value, keeps
+it only in memory, and removes it when execution ends. It must never appear in Run snapshots,
+events, SQLite, logs, artifacts or error messages. The adapter merges allowed values into the
+engine child process while Node-owned home/workspace variables always win.
+
 ### `run.accepted`
 
 Node returns local `runId`, acceptance time and optional queue position. Acceptance means the
@@ -225,6 +295,19 @@ command is durably stored, not that the engine has started.
 
 Carries one ordered local Run event. Events keep their per-Run `sequence`; the envelope also has
 the Node-to-Core connection sequence. Core deduplicates on `(nodeId, runId, event.sequence)`.
+The terminal `engine.result` event may include normalized token, cache, cost and duration usage;
+Core treats absent provider fields as zero and uses the values only for Project observability.
+
+Every new event also carries `traceId`, `spanId`, optional `parentSpanId`, a normalized
+`category` (`lifecycle|model|tool|approval|artifact|log|system`) and `severity`
+(`debug|info|warning|error`). The envelope `trace` repeats the Trace/Span identifiers so gateways
+can route telemetry without parsing the payload. Nodes advertise `observability-trace-v1`,
+`structured-run-events` and `redacted-engine-logs` in their feature capabilities.
+
+Node recursively redacts authorization headers, cookies, passwords, secrets, tokens, API/Access
+Keys and credentials before writing an event to SQLite or the outbox. Core performs the same
+sanitization on read for defense in depth. Hidden model chain-of-thought is never required by the
+protocol; only provider-exposed summaries and activities may be transported.
 
 ### `run.snapshot`
 
@@ -406,12 +489,17 @@ variables.
 - Node advertises all supported versions and Core selects exactly one.
 - Message type behavior is frozen once released.
 
-## 16. v1 implementation phases
+## 16. Implemented v1 capability groups
 
-1. Handshake, registration, heartbeat and full snapshot.
-2. Core-originated Run create/cancel and Node Run event/snapshot replay.
-3. Artifact manifest, inline content and acknowledged chunk upload.
-4. Agent configuration revision sync.
-5. Optional NATS bridge inside Core; the Node wire contract remains unchanged.
+1. Handshake, one-time enrollment, Node-bound credentials, heartbeat lease and full snapshot.
+2. Core-originated Run/Conversation create, cancel and approval decisions, with acknowledged durable replay.
+3. Artifact manifest, presigned object-storage upload, completion verification and synchronization status.
+4. Agent Definition Revision deployment, status feedback, atomic activation and rollback.
+5. Node-local operation while Core is unavailable, followed by idempotent state and artifact synchronization.
+
+All five groups are implemented and covered by unit, browser and Docker acceptance tests. The legacy
+acknowledged WebSocket chunk message remains parseable only for upgrades from older Nodes; new
+artifacts never use it. NATS is outside the single-instance v1 boundary and does not change this edge
+protocol if introduced later.
 
 The TypeScript envelope and payload definitions live in `src/core-protocol.ts`.

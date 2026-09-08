@@ -26,6 +26,8 @@ export const CORE_MESSAGE_TYPES = [
   "agent.upsert",
   "agent.delete",
   "agent.registration",
+  "agent.revision.deploy",
+  "agent.deployment.status",
   "run.create",
   "run.accepted",
   "run.cancel",
@@ -88,6 +90,9 @@ export interface NodeHelloPayload {
       id: string;
       version?: string | undefined;
       ready: boolean;
+      installed?: boolean | undefined;
+      enabled?: boolean | undefined;
+      managedVersion?: string | undefined;
     }>;
     transports: ["websocket"];
     features: string[];
@@ -182,6 +187,26 @@ export interface AgentRegistrationPayload {
   coreAgentId?: string | undefined;
   revision?: number | undefined;
   error?: ProtocolErrorPayload | undefined;
+}
+
+export interface AgentRevisionDeployPayload {
+  deploymentId: string;
+  definitionId: string;
+  agentId: string;
+  revisionId: string;
+  revision: number;
+  contentHash: string;
+  bundle: import("./agent-package.ts").AgentPackageBundle;
+}
+
+export interface AgentDeploymentStatusPayload {
+  deploymentId: string;
+  definitionId: string;
+  agentId: string;
+  revisionId: string;
+  status: "installing" | "active" | "failed";
+  observedAt: string;
+  error?: string | undefined;
 }
 
 export interface RunCreatePayload {
@@ -327,6 +352,8 @@ export type HibroCoreMessage =
   | CoreEnvelope<"agent.upsert", AgentUpsertPayload>
   | CoreEnvelope<"agent.delete", AgentDeletePayload>
   | CoreEnvelope<"agent.registration", AgentRegistrationPayload>
+  | CoreEnvelope<"agent.revision.deploy", AgentRevisionDeployPayload>
+  | CoreEnvelope<"agent.deployment.status", AgentDeploymentStatusPayload>
   | CoreEnvelope<"run.create", RunCreatePayload>
   | CoreEnvelope<"run.accepted", RunAcceptedPayload>
   | CoreEnvelope<"run.cancel", RunCancelPayload>

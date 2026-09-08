@@ -32,6 +32,7 @@ interface LegacyAgentDefinition {
   allowedTools?: string[];
   approvalPolicy?: ApprovalPolicy;
   allowDangerousSandbox?: boolean;
+  package?: AgentDefinition["package"];
   createdAt?: string;
   updatedAt?: string;
 }
@@ -137,6 +138,7 @@ export class FileAgentRegistry {
       allowedTools: input.allowedTools,
       approvalPolicy: input.approvalPolicy ?? "workspace",
       allowDangerousSandbox: input.allowDangerousSandbox ?? false,
+      package: input.package,
       createdAt: previous?.createdAt ?? now,
       updatedAt: now,
     };
@@ -145,14 +147,28 @@ export class FileAgentRegistry {
     }
     const validated = this.validateNormalized(agent);
     this.agents.set(validated.id, validated);
-    await this.persist();
+    try {
+      await this.persist();
+    } catch (error) {
+      if (previous) this.agents.set(previous.id, previous);
+      else this.agents.delete(validated.id);
+      throw error;
+    }
     return validated;
   }
 
   async delete(id: string): Promise<boolean> {
     validateId(id);
+    const previous = this.agents.get(id);
     const deleted = this.agents.delete(id);
-    if (deleted) await this.persist();
+    if (deleted) {
+      try {
+        await this.persist();
+      } catch (error) {
+        if (previous) this.agents.set(id, previous);
+        throw error;
+      }
+    }
     return deleted;
   }
 
@@ -176,6 +192,7 @@ export class FileAgentRegistry {
       allowedTools: value.allowedTools,
       approvalPolicy: value.approvalPolicy ?? "workspace",
       allowDangerousSandbox: value.allowDangerousSandbox ?? false,
+      package: value.package,
       createdAt: value.createdAt ?? now,
       updatedAt: value.updatedAt ?? now,
     });

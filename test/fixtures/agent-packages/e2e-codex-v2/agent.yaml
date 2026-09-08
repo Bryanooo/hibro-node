@@ -1,0 +1,17 @@
+apiVersion: hibro.ai/v1alpha1
+kind: Agent
+metadata:
+  name: E2E Research Agent
+  slug: e2e-research-agent
+  description: Browser-tested Agent as Code package revision two
+spec:
+  engine: codex
+  instructions: instructions.md
+  skills:
+    - name: evidence
+      path: skills/evidence
+  workspace:
+    strategy: persistent
+    access: workspace-write
+  approvalPolicy: workspace
+  maxConcurrency: 1

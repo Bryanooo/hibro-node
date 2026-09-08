@@ -17,9 +17,9 @@ while (($# > 0)); do
 Hibro Node 双模式部署
 
 用法：
-  ./scripts/setup.sh --mode docker [--env-file PATH] [--port PORT] [--project-root PATH]
+  ./scripts/setup.sh --mode docker [--env-file PATH] [--port PORT] [--project-root PATH] [--engines LIST]
   sudo ./scripts/setup.sh --mode native [--env-file PATH] [--port PORT]
-       [--project-root PATH] [--service-user USER]
+       [--project-root PATH] [--service-user USER] [--engines LIST]
 
 docker 是 macOS 和个人设备的推荐模式；native 面向使用 systemd 的 Linux。
 Node 默认只监听本机，不要求登录，也不要求先配置 Hibro Core。

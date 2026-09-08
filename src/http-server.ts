@@ -4,6 +4,8 @@ import {
   isTerminalStatus,
   type AgentDefinition,
   type CreateRunInput,
+  ENGINE_TYPES,
+  type EngineType,
   type SystemSettings,
 } from "./domain.ts";
 import type { RunManager } from "./run-manager.ts";
@@ -15,12 +17,17 @@ import { CONSOLE_CSS, CONSOLE_HTML, CONSOLE_JS } from "./console-assets.ts";
 import { CORE_MESSAGE_TYPES, HIBRO_CORE_PROTOCOL } from "./core-protocol.ts";
 import type { ConversationService } from "./conversation-service.ts";
 import { hibroNodeVersion } from "./version.ts";
+import type { AgentPackageBundle } from "./agent-package.ts";
+import { NodeObservabilityService } from "./observability-service.ts";
+import type { EngineManager } from "./engine-manager.ts";
 
 export interface HttpServerOptions {
   host: string;
   port: number;
   manager: RunManager;
   conversations?: ConversationService | undefined;
+  engineManager?: EngineManager | undefined;
+  onEngineCapabilitiesChanged?: (() => void | Promise<void>) | undefined;
 }
 
 function sendJson(response: ServerResponse, statusCode: number, value: unknown): void {
@@ -29,6 +36,15 @@ function sendJson(response: ServerResponse, statusCode: number, value: unknown):
     "cache-control": "no-store",
   });
   response.end(`${JSON.stringify(value)}\n`);
+}
+
+function writeSse(response: ServerResponse, payload: string): boolean {
+  if (response.destroyed || response.writableEnded) return false;
+  if (response.writableLength > 1024 * 1024) {
+    response.destroy(new Error("SSE slow consumer"));
+    return false;
+  }
+  return response.write(payload);
 }
 
 function publicErrorMessage(error: unknown): string {
@@ -115,7 +131,7 @@ function runRoute(
   pathname: string,
 ): { runId: string; action?: string | undefined } | undefined {
   const match = pathname.match(
-    /^\/v1\/runs\/((?:run_)?[a-f0-9-]{36})(?:\/(events|cancel))?$/i,
+    /^\/v1\/runs\/([a-z0-9_-]{8,80})(?:\/(events|cancel))?$/i,
   );
   return match
     ? { runId: match[1] as string, action: match[2] as string | undefined }
@@ -123,7 +139,8 @@ function runRoute(
 }
 
 export function createHibroHttpServer(options: HttpServerOptions): Server {
-  const { manager, conversations } = options;
+  const { manager, conversations, engineManager } = options;
+  const observability = new NodeObservabilityService(manager);
   return createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", "http://hibro-node.local");
@@ -172,6 +189,24 @@ export function createHibroHttpServer(options: HttpServerOptions): Server {
         });
         return;
       }
+      if (request.method === "GET" && url.pathname === "/live") {
+        sendJson(response, 200, { status: "alive", uptimeSeconds: process.uptime() });
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/ready") {
+        const readiness = await manager.healthCheck();
+        const disk = await statfs(manager.dataDir).then((value) => ({
+          ok: value.bavail * value.bsize >= 100 * 1024 * 1024,
+          freeBytes: value.bavail * value.bsize,
+        })).catch((error) => ({ ok: false, freeBytes: 0, error: String(error) }));
+        const ready = readiness.status === "ready" && disk.ok;
+        sendJson(response, ready ? 200 : 503, {
+          ...readiness,
+          status: ready ? "ready" : "degraded",
+          disk,
+        });
+        return;
+      }
       if (request.method === "GET" && url.pathname === "/v1/capabilities") {
         const engines = await manager.doctorEngines();
         const settings = manager.getSettings();
@@ -197,6 +232,67 @@ export function createHibroHttpServer(options: HttpServerOptions): Server {
         });
         return;
       }
+      if (request.method === "GET" && url.pathname === "/v1/engines") {
+        const probes = new Map(
+          (await manager.doctorEngines()).map(({ id, doctor }) => [id, doctor]),
+        );
+        const catalog = engineManager?.catalog() ?? ENGINE_TYPES.map((id) => ({ id }));
+        sendJson(response, 200, {
+          engines: catalog.map((entry) => {
+            const doctor = probes.get(entry.id as EngineType);
+            const managedVersion = "installedVersion" in entry
+              ? entry.installedVersion as string | undefined
+              : undefined;
+            return {
+              ...entry,
+              installed: doctor?.installed === true,
+              ready: doctor?.ready === true,
+              runtimeVersion: doctor?.version,
+              runtimeExecutable: doctor?.executable,
+              loggedIn: doctor?.loggedIn,
+              authMethod: doctor?.authMethod,
+              credentialSource: doctor?.credentialSource,
+              error: doctor?.error,
+              source: managedVersion
+                ? "managed"
+                : doctor?.installed
+                  ? process.env.HIBRO_CONTAINER === "docker" ? "bundled" : "external"
+                  : "none",
+            };
+          }),
+          policy: {
+            catalog: "official-allowlist",
+            exactVersionsOnly: true,
+            credentialsManagedSeparately: true,
+          },
+        });
+        return;
+      }
+      const engineActionMatch = url.pathname.match(
+        /^\/v1\/engines\/(claude-code|codex|openclaw)\/(install|update|activate|enable|disable|uninstall)$/,
+      );
+      if (request.method === "POST" && engineActionMatch) {
+        if (!engineManager) throw new Error("Engine management is not available");
+        const id = engineActionMatch[1] as EngineType;
+        const action = engineActionMatch[2] as string;
+        const body = (await readJsonBody(request)) as { version?: string | undefined };
+        if (action === "uninstall" && manager.isEngineBusy(id)) {
+          throw new Error(`Cannot uninstall ${id} while it has active runs`);
+        }
+        const result = action === "install" || action === "update"
+          ? await engineManager.install(id, body.version)
+          : action === "activate"
+            ? await engineManager.activate(id, body.version ?? "")
+          : action === "enable"
+            ? await engineManager.setEnabled(id, true)
+            : action === "disable"
+              ? await engineManager.setEnabled(id, false)
+              : await engineManager.uninstall(id);
+        manager.clearDoctorCache();
+        await options.onEngineCapabilitiesChanged?.();
+        sendJson(response, 200, result);
+        return;
+      }
       if (request.method === "GET" && url.pathname === "/v1/protocol") {
         sendJson(response, 200, {
           protocol: HIBRO_CORE_PROTOCOL,
@@ -216,6 +312,68 @@ export function createHibroHttpServer(options: HttpServerOptions): Server {
           },
           runtimeTransportImplemented: true,
         });
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/v1/extensions") {
+        const engines = await manager.doctorEngines();
+        sendJson(response, 200, {
+          apiVersion: "hibro.extensions.v1",
+          modules: [{
+            id: "agent-runtime",
+            name: "Hibro Agent Runtime",
+            version: hibroNodeVersion(),
+            kind: "platform",
+            status: "active",
+            capabilities: ["multi-agent", "agent-as-code-v1", "workspaces", "trace-v1", "artifacts"],
+            permissions: [],
+            dependencies: [],
+            provides: { apiNamespaces: ["/v1/runs", "/v1/observability"] },
+          }],
+          providers: engines.map(({ id, doctor }) => ({
+            id,
+            kind: "agent-engine",
+            name: id,
+            version: doctor.version ?? "unknown",
+            active: doctor.ready,
+            capabilities: ["execute", "stream-events", "approval", "sessions"],
+            configuration: "environment",
+          })),
+        });
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/v1/observability/overview") {
+        sendJson(response, 200, await observability.overview(Number(url.searchParams.get("days") ?? 7)));
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/v1/observability/traces") {
+        sendJson(response, 200, {
+          traces: await observability.traces({
+            ...(url.searchParams.get("agentId") ? { agentId: url.searchParams.get("agentId") as string } : {}),
+            ...(url.searchParams.get("status") ? { status: url.searchParams.get("status") as string } : {}),
+            limit: Number(url.searchParams.get("limit") ?? 100),
+          }),
+        });
+        return;
+      }
+      const observabilityTraceMatch = url.pathname.match(/^\/v1\/observability\/traces\/([a-z0-9_-]{8,80})$/i);
+      if (request.method === "GET" && observabilityTraceMatch) {
+        const trace = await observability.trace(observabilityTraceMatch[1] as string);
+        sendJson(response, trace ? 200 : 404, trace ?? { error: "trace_not_found" });
+        return;
+      }
+      const observabilityAgentMatch = url.pathname.match(/^\/v1\/observability\/agents\/([a-z0-9._-]{2,64})$/i);
+      if (request.method === "GET" && observabilityAgentMatch) {
+        const metrics = await observability.agentMetrics(
+          observabilityAgentMatch[1] as string,
+          Number(url.searchParams.get("days") ?? 30),
+        );
+        sendJson(response, metrics ? 200 : 404, metrics ?? { error: "agent_not_found" });
+        return;
+      }
+      const observabilityArtifactMatch = url.pathname.match(/^\/v1\/observability\/artifacts\/([a-z0-9_-]+)\/lineage$/i);
+      if (request.method === "GET" && observabilityArtifactMatch) {
+        const lineage = await observability.artifactLineage(observabilityArtifactMatch[1] as string);
+        sendJson(response, lineage ? 200 : 404, lineage ?? { error: "artifact_not_found" });
         return;
       }
       if (request.method === "POST" && url.pathname === "/v1/capabilities/refresh") {
@@ -349,6 +507,47 @@ export function createHibroHttpServer(options: HttpServerOptions): Server {
         sendJson(response, 200, { agents: await manager.listAgents() });
         return;
       }
+      if (request.method === "GET" && url.pathname === "/v1/agent-revisions") {
+        sendJson(response, 200, {
+          revisions: await manager.listAgentRevisions(
+            url.searchParams.get("agentId") ?? undefined,
+          ),
+        });
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/v1/agent-packages/import") {
+        const body = (await readJsonBody(request)) as { path?: unknown; agentId?: unknown };
+        if (typeof body.path !== "string" || !body.path.trim()) throw new Error("path is required");
+        const revision = await manager.importAgentPackage(
+          body.path,
+          typeof body.agentId === "string" ? body.agentId : undefined,
+        );
+        sendJson(response, 201, { revision, agent: manager.getAgent(revision.agentId) });
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/v1/agent-packages/deploy") {
+        const body = (await readJsonBody(request)) as {
+          agentId?: string;
+          definitionId?: string;
+          revisionId?: string;
+          revision?: number;
+          expectedHash?: string;
+          origin?: "local" | "hibro-core";
+          bundle?: AgentPackageBundle;
+        };
+        if (!body.bundle) throw new Error("bundle is required");
+        const revision = await manager.deployAgentPackage({
+          ...(body.agentId ? { agentId: body.agentId } : {}),
+          ...(body.definitionId ? { definitionId: body.definitionId } : {}),
+          ...(body.revisionId ? { revisionId: body.revisionId } : {}),
+          ...(body.revision !== undefined ? { revision: body.revision } : {}),
+          ...(body.expectedHash ? { expectedHash: body.expectedHash } : {}),
+          origin: body.origin ?? "local",
+          bundle: body.bundle,
+        });
+        sendJson(response, 201, { revision, agent: manager.getAgent(revision.agentId) });
+        return;
+      }
       if (request.method === "POST" && url.pathname === "/v1/agents") {
         if (!manager.agents) {
           sendJson(response, 409, { error: "agent_registry_unavailable" });
@@ -376,6 +575,19 @@ export function createHibroHttpServer(options: HttpServerOptions): Server {
         return;
       }
       const agentMatch = url.pathname.match(/^\/v1\/agents\/([a-z0-9._-]{2,64})$/i);
+      const activateRevisionMatch = url.pathname.match(
+        /^\/v1\/agents\/([a-z0-9._-]{2,64})\/activate$/i,
+      );
+      if (request.method === "POST" && activateRevisionMatch) {
+        const body = (await readJsonBody(request)) as { revisionId?: unknown };
+        if (typeof body.revisionId !== "string") throw new Error("revisionId is required");
+        const revision = await manager.activateAgentRevision(
+          activateRevisionMatch[1] as string,
+          body.revisionId,
+        );
+        sendJson(response, 200, { revision, agent: manager.getAgent(revision.agentId) });
+        return;
+      }
       if (request.method === "GET" && agentMatch) {
         const agent = manager.getAgent(agentMatch[1] as string);
         sendJson(response, agent ? 200 : 404, agent ?? { error: "agent_not_found" });
@@ -577,14 +789,14 @@ export function createHibroHttpServer(options: HttpServerOptions): Server {
           "x-accel-buffering": "no",
         });
         const writeEvent = (event: unknown): void => {
-          response.write(
+          writeSse(response,
             `event: conversation-event\ndata: ${JSON.stringify(event)}\n\n`,
           );
         };
         replay.forEach(writeEvent);
         const unsubscribe = conversations?.subscribe(conversationId, writeEvent);
         const heartbeat = setInterval(
-          () => response.write(": heartbeat\n\n"),
+          () => writeSse(response, ": heartbeat\n\n"),
           15_000,
         );
         heartbeat.unref();
@@ -605,7 +817,7 @@ export function createHibroHttpServer(options: HttpServerOptions): Server {
         return;
       }
       const approvalRoute = url.pathname.match(
-        /^\/v1\/runs\/((?:run_)?[a-f0-9-]{36})\/approval\/([^/]+)$/i,
+        /^\/v1\/runs\/([a-z0-9_-]{8,80})\/approval\/([^/]+)$/i,
       );
       if (approvalRoute && request.method === "POST") {
         const body = (await readJsonBody(request)) as {
@@ -661,7 +873,7 @@ export function createHibroHttpServer(options: HttpServerOptions): Server {
           "x-accel-buffering": "no",
         });
         const writeEvent = (event: unknown): void => {
-          response.write(`event: run-event\ndata: ${JSON.stringify(event)}\n\n`);
+          writeSse(response, `event: run-event\ndata: ${JSON.stringify(event)}\n\n`);
         };
         for (const event of await manager.eventsAfter(route.runId, after)) {
           writeEvent(event);
@@ -671,7 +883,7 @@ export function createHibroHttpServer(options: HttpServerOptions): Server {
           return;
         }
         const unsubscribe = manager.subscribe(route.runId, writeEvent);
-        const heartbeat = setInterval(() => response.write(": heartbeat\n\n"), 15_000);
+        const heartbeat = setInterval(() => writeSse(response, ": heartbeat\n\n"), 15_000);
         heartbeat.unref();
         request.once("close", () => {
           clearInterval(heartbeat);

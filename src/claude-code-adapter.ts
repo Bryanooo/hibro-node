@@ -12,10 +12,12 @@ import {
 } from "./engine-adapter.ts";
 import { selectEngineEnvironment } from "./engine-environment.ts";
 import { PausableExecutionTimeout } from "./execution-timeout.ts";
+import { processGroupOptions, terminateProcessTree } from "./process-lifecycle.ts";
 import { createId, createSecret } from "./identity.ts";
 
 export interface ClaudeAdapterOptions {
   executable?: string;
+  resolveExecutable?: ((fallback: string) => string) | undefined;
   environment?: NodeJS.ProcessEnv | undefined;
 }
 
@@ -49,12 +51,18 @@ interface CommandResult {
 
 export class ClaudeCodeAdapter implements AgentEngineAdapter {
   readonly engineType: EngineType = "claude-code";
-  readonly executable: string;
+  private readonly fallbackExecutable: string;
+  private readonly executableResolver?: ((fallback: string) => string) | undefined;
   private readonly environment: NodeJS.ProcessEnv;
 
   constructor(options: ClaudeAdapterOptions = {}) {
-    this.executable = options.executable ?? process.env.HIBRO_CLAUDE_BIN ?? "claude";
+    this.fallbackExecutable = options.executable ?? process.env.HIBRO_CLAUDE_BIN ?? "claude";
+    this.executableResolver = options.resolveExecutable;
     this.environment = selectEngineEnvironment("claude-code", options.environment);
+  }
+
+  get executable(): string {
+    return this.executableResolver?.(this.fallbackExecutable) ?? this.fallbackExecutable;
   }
 
   async doctor(): Promise<ClaudeDoctorResult> {
@@ -122,9 +130,10 @@ export class ClaudeCodeAdapter implements AgentEngineAdapter {
     const child = spawn(this.executable, args, {
       cwd: input.workspace,
       env: approvalHook
-        ? { ...this.environment, HIBRO_APPROVAL_TOKEN: approvalHook.token }
-        : this.environment,
+        ? { ...this.environment, ...input.environment, HIBRO_APPROVAL_TOKEN: approvalHook.token }
+        : { ...this.environment, ...input.environment },
       stdio: ["ignore", "pipe", "pipe"],
+      ...processGroupOptions(),
     });
 
     let stderr = "";
@@ -140,9 +149,7 @@ export class ClaudeCodeAdapter implements AgentEngineAdapter {
       if (child.exitCode !== null || child.killed) {
         return;
       }
-      child.kill("SIGTERM");
-      forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 2_000);
-      forceKillTimer.unref();
+      forceKillTimer = terminateProcessTree(child);
     };
 
     const abortListener = (): void => terminate();

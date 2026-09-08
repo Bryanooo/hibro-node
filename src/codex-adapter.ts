@@ -11,6 +11,8 @@ import {
 } from "./engine-adapter.ts";
 import { selectEngineEnvironment } from "./engine-environment.ts";
 import { PausableExecutionTimeout } from "./execution-timeout.ts";
+import { processGroupOptions, terminateProcessTree } from "./process-lifecycle.ts";
+import { hibroNodeVersion } from "./version.ts";
 
 interface CommandResult {
   exitCode: number;
@@ -28,17 +30,24 @@ interface RpcMessage extends Record<string, unknown> {
 
 export interface CodexAdapterOptions {
   executable?: string | undefined;
+  resolveExecutable?: ((fallback: string) => string) | undefined;
   environment?: NodeJS.ProcessEnv | undefined;
 }
 
 export class CodexAdapter implements AgentEngineAdapter {
   readonly engineType = "codex" as const;
-  readonly executable: string;
+  private readonly fallbackExecutable: string;
+  private readonly executableResolver?: ((fallback: string) => string) | undefined;
   private readonly environment: NodeJS.ProcessEnv;
 
   constructor(options: CodexAdapterOptions = {}) {
-    this.executable = options.executable ?? process.env.HIBRO_CODEX_BIN ?? "codex";
+    this.fallbackExecutable = options.executable ?? process.env.HIBRO_CODEX_BIN ?? "codex";
+    this.executableResolver = options.resolveExecutable;
     this.environment = selectEngineEnvironment("codex", options.environment);
+  }
+
+  get executable(): string {
+    return this.executableResolver?.(this.fallbackExecutable) ?? this.fallbackExecutable;
   }
 
   async doctor(): Promise<EngineDoctorResult> {
@@ -87,6 +96,7 @@ export class CodexAdapter implements AgentEngineAdapter {
       cwd: input.workspace,
       env: environment,
       stdio: ["pipe", "pipe", "pipe"],
+      ...processGroupOptions(),
     });
     const processExit = new Promise<number>((resolvePromise, reject) => {
       child.once("error", reject);
@@ -123,9 +133,7 @@ export class CodexAdapter implements AgentEngineAdapter {
 
     const terminate = (): void => {
       if (child.exitCode !== null || child.killed) return;
-      child.kill("SIGTERM");
-      forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 2_000);
-      forceKillTimer.unref();
+      forceKillTimer = terminateProcessTree(child);
     };
     const abortListener = (): void => terminate();
     input.signal?.addEventListener("abort", abortListener, { once: true });
@@ -328,7 +336,7 @@ export class CodexAdapter implements AgentEngineAdapter {
         clientInfo: {
           name: "hibro_node",
           title: "Hibro Node",
-          version: "0.1.0",
+          version: hibroNodeVersion(),
         },
         capabilities: {
           experimentalApi: true,
@@ -434,7 +442,7 @@ export class CodexAdapter implements AgentEngineAdapter {
   private async prepareEnvironment(
     input: EngineExecuteInput,
   ): Promise<NodeJS.ProcessEnv> {
-    if (!input.statePath) return this.environment;
+    if (!input.statePath) return { ...this.environment, ...input.environment };
     const target = join(input.statePath, "codex");
     await mkdir(target, { recursive: true });
     const source = this.environment.CODEX_HOME;
@@ -452,6 +460,6 @@ export class CodexAdapter implements AgentEngineAdapter {
         }
       }
     }
-    return { ...this.environment, CODEX_HOME: target };
+    return { ...this.environment, ...input.environment, CODEX_HOME: target };
   }
 }

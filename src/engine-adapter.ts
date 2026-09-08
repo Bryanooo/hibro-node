@@ -19,6 +19,8 @@ export interface EngineExecuteInput {
   statePath?: string | undefined;
   sessionKey?: string | undefined;
   options?: EngineRunOptions | undefined;
+  /** Ephemeral per-Run secrets. Never persist this map in Run records or events. */
+  environment?: Record<string, string> | undefined;
   signal?: AbortSignal | undefined;
   onEvent?: ((type: string, payload: Record<string, unknown>) => void) | undefined;
   requestApproval?:
@@ -69,8 +71,15 @@ export class EngineRegistry {
 
   constructor(adapters: AgentEngineAdapter[]) {
     for (const adapter of adapters) {
-      this.adapters.set(adapter.engineType, adapter);
+      this.register(adapter);
     }
+  }
+
+  register(adapter: AgentEngineAdapter): void {
+    if (this.adapters.has(adapter.engineType)) {
+      throw new Error(`Engine adapter is already registered: ${adapter.engineType}`);
+    }
+    this.adapters.set(adapter.engineType, adapter);
   }
 
   get(engine: EngineType): AgentEngineAdapter | undefined {
@@ -79,5 +88,39 @@ export class EngineRegistry {
 
   list(): AgentEngineAdapter[] {
     return [...this.adapters.values()];
+  }
+}
+
+export interface EngineProvider<TContext> {
+  readonly id: EngineType;
+  readonly version: string;
+  readonly capabilities: string[];
+  create(context: TContext): AgentEngineAdapter;
+}
+
+/**
+ * Compile-time provider registry. Third-party providers can be registered by a
+ * trusted distribution without changing RunManager or the protocol layer.
+ */
+export class EngineProviderRegistry<TContext> {
+  private readonly providers = new Map<EngineType, EngineProvider<TContext>>();
+
+  register(provider: EngineProvider<TContext>): void {
+    if (this.providers.has(provider.id)) {
+      throw new Error(`Engine provider is already registered: ${provider.id}`);
+    }
+    this.providers.set(provider.id, provider);
+  }
+
+  createAll(context: TContext): AgentEngineAdapter[] {
+    return [...this.providers.values()].map((provider) => provider.create(context));
+  }
+
+  catalog(): Array<Pick<EngineProvider<TContext>, "id" | "version" | "capabilities">> {
+    return [...this.providers.values()].map(({ id, version, capabilities }) => ({
+      id,
+      version,
+      capabilities: [...capabilities],
+    }));
   }
 }

@@ -62,7 +62,7 @@ export function discoverClaudeExecutable(
 export function loadConfig(overrides: Partial<NodeConfig> = {}): NodeConfig {
   const importShellEnvironment =
     process.env.HIBRO_IMPORT_SHELL_ENV?.toLowerCase() !== "false";
-  return {
+  const config: NodeConfig = {
     host: overrides.host ?? process.env.HIBRO_NODE_HOST ?? "127.0.0.1",
     port: overrides.port ?? parsePort(process.env.HIBRO_NODE_PORT),
     dataDir:
@@ -89,4 +89,13 @@ export function loadConfig(overrides: Partial<NodeConfig> = {}): NodeConfig {
     shellExecutable:
       overrides.shellExecutable ?? process.env.SHELL ?? "/bin/zsh",
   };
+  if (
+    !["127.0.0.1", "::1", "localhost"].includes(config.host) &&
+    process.env.HIBRO_NODE_ALLOW_REMOTE_ACCESS !== "true"
+  ) {
+    throw new Error(
+      "Hibro Node has no login boundary: non-loopback HTTP binding requires HIBRO_NODE_ALLOW_REMOTE_ACCESS=true behind a trusted network boundary",
+    );
+  }
+  return config;
 }

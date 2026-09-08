@@ -7,6 +7,7 @@ env_file="${HIBRO_SETUP_ENV_FILE:-${repo_dir}/.env}"
 compose_project="${HIBRO_SETUP_PROJECT_NAME:-hibro-node}"
 port_arg=""
 project_root_arg=""
+engines_arg=""
 
 usage() {
   cat <<'EOF'
@@ -14,7 +15,7 @@ Hibro Node Docker 一键部署
 
 用法：
   ./scripts/setup.sh --mode docker [--env-file PATH] [--port PORT]
-                                   [--project-root PATH]
+                                   [--project-root PATH] [--engines LIST]
 
 脚本会创建私有环境文件、构建镜像、启动 Node 并执行健康检查。
 Claude/OpenClaw 可读取环境文件中的 Anthropic Token；Codex 复用当前用户的 ~/.codex。
@@ -36,6 +37,11 @@ while (($# > 0)); do
     --project-root)
       [[ $# -ge 2 ]] || { echo "--project-root 缺少参数" >&2; exit 2; }
       project_root_arg="$2"
+      shift 2
+      ;;
+    --engines)
+      [[ $# -ge 2 ]] || { echo "--engines 缺少参数" >&2; exit 2; }
+      engines_arg="$2"
       shift 2
       ;;
     -h|--help)
@@ -120,8 +126,10 @@ validate_path() {
 
 existing_port="$(read_env_value HIBRO_DOCKER_PORT)"
 existing_project_root="$(read_env_value HIBRO_NODE_PROJECT_ROOT)"
+existing_engines="$(read_env_value HIBRO_BUNDLED_ENGINES)"
 docker_port="${port_arg:-${existing_port:-}}"
 project_root="${project_root_arg:-${existing_project_root:-}}"
+bundled_engines="${engines_arg:-${existing_engines:-all}}"
 docker_port="${docker_port:-$(prompt_value "Node 本机访问端口" "17332")}"
 project_root="${project_root:-$(prompt_value "Agent 初始项目目录" "$(pwd)")}"
 project_root="$(cd -- "${project_root}" 2>/dev/null && pwd)" || {
@@ -130,6 +138,16 @@ project_root="$(cd -- "${project_root}" 2>/dev/null && pwd)" || {
 }
 validate_port "${docker_port}"
 validate_path "${project_root}"
+if [[ "${bundled_engines}" != "all" && "${bundled_engines}" != "none" ]]; then
+  IFS=',' read -r -a requested_engines <<<"${bundled_engines}"
+  ((${#requested_engines[@]} > 0)) || { echo "--engines 不能为空" >&2; exit 1; }
+  for engine in "${requested_engines[@]}"; do
+    [[ "${engine}" == "claude-code" || "${engine}" == "codex" || "${engine}" == "openclaw" ]] || {
+      echo "不支持的引擎：${engine}" >&2
+      exit 1
+    }
+  done
+fi
 
 host_home="${HOME}"
 if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]] &&
@@ -151,6 +169,9 @@ if [[ ! -f "${env_file}" ]]; then
       printf 'HIBRO_NODE_CONTAINER_NAME=%s\n' \
         "${HIBRO_SETUP_CONTAINER_NAME:-hibro-node-local}"
       printf 'HIBRO_CODEX_DIR=%s/.codex\n' "${host_home}"
+      printf 'HIBRO_BUNDLED_ENGINES=%s\n' "${bundled_engines}"
+      printf 'HIBRO_DEBIAN_MIRROR=%s\n' "${HIBRO_DEBIAN_MIRROR:-http://deb.debian.org}"
+      printf 'HIBRO_NPM_REGISTRY=%s\n' "${HIBRO_NPM_REGISTRY:-https://registry.npmjs.org}"
       printf 'ANTHROPIC_API_KEY=%s\n' "${ANTHROPIC_API_KEY:-}"
       printf 'ANTHROPIC_AUTH_TOKEN=%s\n' "${ANTHROPIC_AUTH_TOKEN:-}"
       printf 'ANTHROPIC_BASE_URL=%s\n' "${ANTHROPIC_BASE_URL:-}"
@@ -164,6 +185,7 @@ else
 fi
 set_env_value HIBRO_DOCKER_PORT "${docker_port}"
 set_env_value HIBRO_NODE_PROJECT_ROOT "${project_root}"
+set_env_value HIBRO_BUNDLED_ENGINES "${bundled_engines}"
 if [[ -z "$(read_env_value HIBRO_CODEX_DIR)" ]]; then
   set_env_value HIBRO_CODEX_DIR "${host_home}/.codex"
 fi
@@ -198,4 +220,5 @@ fi
 echo
 echo "Hibro Node 已启动：http://127.0.0.1:${docker_port}/console"
 echo "Agent 初始项目：${project_root}"
+echo "镜像预装引擎：${bundled_engines}"
 echo "Node 可独立使用；如需接入 Core，请在 Node「系统配置」填写 Core URL 和一次性注册码。"

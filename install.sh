@@ -58,6 +58,7 @@ Hibro Node 一键安装与升级
   --port PORT
   --project-root PATH
   --service-user USER      仅 Native
+  --engines LIST           all、none 或逗号分隔的 claude-code,codex,openclaw
 
 仅在使用远程发布包时才需要访问 GitHub；公开仓库不要求账号或 Git。
 EOF
@@ -125,7 +126,7 @@ while (($# > 0)); do
       force="true"
       shift
       ;;
-    --env-file|--port|--project-root|--service-user)
+    --env-file|--port|--project-root|--service-user|--engines)
       [[ $# -ge 2 ]] || fail "$1 缺少参数。"
       setup_args+=("$1" "$2")
       shift 2

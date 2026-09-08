@@ -1,8 +1,8 @@
-import { appendFile, chmod, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, open, readFile, readdir, rename, rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { RunEvent, RunRecord } from "./domain.ts";
+import type { ArtifactRecord, RunEvent, RunRecord } from "./domain.ts";
 
 function assertSafeRunId(runId: string): void {
   if (
@@ -21,11 +21,27 @@ async function readJson<T>(path: string): Promise<T> {
 export async function writeJsonAtomically(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-  await rename(temporary, path);
+  try {
+    const handle = await open(temporary, "wx", 0o600);
+    try {
+      await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(temporary, path);
+    const directory = await open(dirname(path), "r");
+    try {
+      await directory.sync().catch((error: NodeJS.ErrnoException) => {
+        if (!["EINVAL", "ENOTSUP"].includes(error.code ?? "")) throw error;
+      });
+    } finally {
+      await directory.close();
+    }
+  } catch (error) {
+    await rm(temporary, { force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 export interface CoreOutboxRecord {
@@ -52,6 +68,13 @@ export interface RunStore {
   readonly rootDir: string;
   readonly databasePath?: string | undefined;
   init(): Promise<void>;
+  close(): Promise<void>;
+  healthCheck(): Promise<{
+    ok: boolean;
+    detail: string;
+    pendingMessages: number;
+    deadMessages: number;
+  }>;
   create(run: RunRecord): Promise<void>;
   update(run: RunRecord): Promise<void>;
   get(runId: string): Promise<RunRecord | undefined>;
@@ -59,6 +82,9 @@ export interface RunStore {
   appendEvent(event: RunEvent): Promise<void>;
   getEvents(runId: string, afterSequence?: number): Promise<RunEvent[]>;
   pruneTerminalRunsBefore(cutoff: Date): Promise<string[]>;
+  listArtifacts(): ArtifactRecord[];
+  isArtifactIndexed(runId: string): boolean;
+  replaceArtifacts(runId: string, artifacts: ArtifactRecord[]): void;
   enqueueCoreMessage(record: CoreOutboxRecord): void;
   pendingCoreMessages(now?: Date, limit?: number): CoreOutboxRecord[];
   markCoreMessageAttempt(messageId: string, nextAttemptAt: Date): void;
@@ -76,6 +102,7 @@ export class FileRunStore implements RunStore {
   private readonly coreOutbox = new Map<string, CoreOutboxRecord>();
   private readonly processedCoreCommands = new Map<string, string>();
   private readonly artifactSync = new Map<string, ArtifactSyncRecord>();
+  private readonly artifactCatalog = new Map<string, ArtifactRecord[]>();
 
   constructor(rootDir: string) {
     this.rootDir = rootDir;
@@ -84,6 +111,19 @@ export class FileRunStore implements RunStore {
   async init(): Promise<void> {
     await mkdir(this.rootDir, { recursive: true, mode: 0o700 });
     await mkdir(this.runsDir(), { recursive: true, mode: 0o700 });
+  }
+
+  async close(): Promise<void> {}
+
+  async healthCheck(): Promise<{ ok: boolean; detail: string; pendingMessages: number; deadMessages: number }> {
+    await mkdir(this.rootDir, { recursive: true, mode: 0o700 });
+    const records = [...this.coreOutbox.values()];
+    return {
+      ok: true,
+      detail: "file-store writable",
+      pendingMessages: records.filter((item) => item.attemptCount < 20).length,
+      deadMessages: records.filter((item) => item.attemptCount >= 20).length,
+    };
   }
 
   async create(run: RunRecord): Promise<void> {
@@ -161,9 +201,22 @@ export class FileRunStore implements RunStore {
       for (const [artifactId, sync] of this.artifactSync) {
         if (sync.runId === run.id) this.artifactSync.delete(artifactId);
       }
+      this.artifactCatalog.delete(run.id);
       removed.push(run.id);
     }
     return removed;
+  }
+
+  listArtifacts(): ArtifactRecord[] {
+    return [...this.artifactCatalog.values()].flat().map((artifact) => ({ ...artifact }));
+  }
+
+  isArtifactIndexed(runId: string): boolean {
+    return this.artifactCatalog.has(runId);
+  }
+
+  replaceArtifacts(runId: string, artifacts: ArtifactRecord[]): void {
+    this.artifactCatalog.set(runId, artifacts.map((artifact) => ({ ...artifact })));
   }
 
   enqueueCoreMessage(record: CoreOutboxRecord): void {
@@ -176,8 +229,9 @@ export class FileRunStore implements RunStore {
     return [...this.coreOutbox.values()]
       .filter(
         (record) =>
-          !record.nextAttemptAt ||
-          new Date(record.nextAttemptAt).getTime() <= now.getTime(),
+          record.attemptCount < 20 &&
+          (!record.nextAttemptAt ||
+            new Date(record.nextAttemptAt).getTime() <= now.getTime()),
       )
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
       .slice(0, limit)
@@ -300,6 +354,13 @@ export class SqliteRunStore implements RunStore {
     await mkdir(this.rootDir, { recursive: true, mode: 0o700 });
     await chmod(this.rootDir, 0o700);
     const database = new DatabaseSync(this.databasePath, { timeout: 5_000 });
+    const schemaVersion = Number(
+      (database.prepare("PRAGMA user_version").get() as Record<string, number>).user_version ?? 0,
+    );
+    if (schemaVersion > 4) {
+      database.close();
+      throw new Error(`Node database schema ${schemaVersion} is newer than supported schema 4`);
+    }
     database.exec(`
       PRAGMA journal_mode = WAL;
       PRAGMA synchronous = NORMAL;
@@ -337,7 +398,9 @@ export class SqliteRunStore implements RunStore {
         payload_json TEXT NOT NULL,
         attempt_count INTEGER NOT NULL DEFAULT 0,
         next_attempt_at TEXT,
-        acknowledged_at TEXT
+        acknowledged_at TEXT,
+        dead_letter_at TEXT,
+        last_error TEXT
       );
       CREATE INDEX IF NOT EXISTS core_outbox_pending_idx
         ON core_outbox(acknowledged_at, next_attempt_at, created_at);
@@ -362,11 +425,55 @@ export class SqliteRunStore implements RunStore {
         ON artifact_sync(message_id);
       CREATE INDEX IF NOT EXISTS artifact_sync_status_idx
         ON artifact_sync(status, updated_at);
-      PRAGMA user_version = 3;
+      CREATE TABLE IF NOT EXISTS artifact_catalog (
+        artifact_id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS artifact_catalog_run_idx
+        ON artifact_catalog(run_id, created_at DESC);
+      CREATE TABLE IF NOT EXISTS artifact_indexed_runs (
+        run_id TEXT PRIMARY KEY,
+        indexed_at TEXT NOT NULL,
+        FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+      );
     `);
+    const outboxColumns = database.prepare("PRAGMA table_info(core_outbox)").all() as unknown as
+      Array<{ name: string }>;
+    if (!outboxColumns.some((column) => column.name === "dead_letter_at")) {
+      database.exec("ALTER TABLE core_outbox ADD COLUMN dead_letter_at TEXT");
+    }
+    if (!outboxColumns.some((column) => column.name === "last_error")) {
+      database.exec("ALTER TABLE core_outbox ADD COLUMN last_error TEXT");
+    }
+    database.exec("PRAGMA user_version = 4");
     this.database = database;
     await chmod(this.databasePath, 0o600);
     await this.importLegacyRuns();
+  }
+
+  async close(): Promise<void> {
+    this.database?.close();
+    this.database = undefined;
+  }
+
+  async healthCheck(): Promise<{ ok: boolean; detail: string; pendingMessages: number; deadMessages: number }> {
+    const result = this.connection().prepare("PRAGMA quick_check").get() as
+      | Record<string, string>
+      | undefined;
+    const detail = String(result ? Object.values(result)[0] : "unknown");
+    const count = (where: string): number => Number(
+      (this.connection().prepare(`SELECT COUNT(*) AS count FROM core_outbox WHERE ${where}`).get() as { count: number }).count,
+    );
+    const stats = {
+      pendingMessages: count("acknowledged_at IS NULL AND dead_letter_at IS NULL"),
+      deadMessages: count("dead_letter_at IS NOT NULL"),
+    };
+    if (detail !== "ok") return { ok: false, detail, ...stats };
+    this.connection().exec("BEGIN IMMEDIATE; ROLLBACK;");
+    return { ok: true, detail: "sqlite quick_check ok and writable", ...stats };
   }
 
   async create(run: RunRecord): Promise<void> {
@@ -455,6 +562,44 @@ export class SqliteRunStore implements RunStore {
     return removed;
   }
 
+  listArtifacts(): ArtifactRecord[] {
+    const rows = this.connection().prepare(
+      "SELECT payload_json FROM artifact_catalog ORDER BY created_at DESC",
+    ).all() as unknown as PayloadRow[];
+    return rows.map((row) => JSON.parse(row.payload_json) as ArtifactRecord);
+  }
+
+  isArtifactIndexed(runId: string): boolean {
+    return Boolean(
+      this.connection().prepare(
+        "SELECT run_id FROM artifact_indexed_runs WHERE run_id = ?",
+      ).get(runId),
+    );
+  }
+
+  replaceArtifacts(runId: string, artifacts: ArtifactRecord[]): void {
+    const database = this.connection();
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      database.prepare("DELETE FROM artifact_catalog WHERE run_id = ?").run(runId);
+      const insert = database.prepare(`
+        INSERT INTO artifact_catalog(artifact_id, run_id, created_at, payload_json)
+        VALUES (?, ?, ?, ?)
+      `);
+      for (const artifact of artifacts) {
+        insert.run(artifact.id, runId, artifact.createdAt, JSON.stringify(artifact));
+      }
+      database.prepare(`
+        INSERT INTO artifact_indexed_runs(run_id, indexed_at) VALUES (?, ?)
+        ON CONFLICT(run_id) DO UPDATE SET indexed_at=excluded.indexed_at
+      `).run(runId, new Date().toISOString());
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   enqueueCoreMessage(record: CoreOutboxRecord): void {
     this.connection()
       .prepare(`
@@ -478,6 +623,7 @@ export class SqliteRunStore implements RunStore {
         SELECT message_id, created_at, type, payload_json, attempt_count, next_attempt_at
         FROM core_outbox
         WHERE acknowledged_at IS NULL
+          AND dead_letter_at IS NULL
           AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
         ORDER BY created_at ASC, rowid ASC
         LIMIT ?
@@ -497,10 +643,13 @@ export class SqliteRunStore implements RunStore {
     this.connection()
       .prepare(`
         UPDATE core_outbox
-        SET attempt_count = attempt_count + 1, next_attempt_at = ?
+        SET attempt_count = attempt_count + 1,
+            next_attempt_at = ?,
+            dead_letter_at = CASE WHEN attempt_count + 1 >= 20 THEN ? ELSE dead_letter_at END,
+            last_error = CASE WHEN attempt_count + 1 >= 20 THEN 'maximum delivery attempts exceeded' ELSE last_error END
         WHERE message_id = ? AND acknowledged_at IS NULL
       `)
-      .run(nextAttemptAt.toISOString(), messageId);
+      .run(nextAttemptAt.toISOString(), new Date().toISOString(), messageId);
   }
 
   acknowledgeCoreMessage(messageId: string, acknowledgedAt = new Date()): void {

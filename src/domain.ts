@@ -102,6 +102,14 @@ export interface AgentDefinition {
   allowedTools?: string[] | undefined;
   approvalPolicy?: ApprovalPolicy | undefined;
   allowDangerousSandbox?: boolean | undefined;
+  package?: {
+    definitionId?: string | undefined;
+    revisionId: string;
+    revision: number;
+    contentHash: string;
+    origin: "local" | "hibro-core";
+    activatedAt: string;
+  } | undefined;
   createdAt: string;
   updatedAt: string;
 }
@@ -160,6 +168,7 @@ export interface SystemSettings {
 export interface ArtifactRecord {
   id: string;
   runId: string;
+  origin?: RunOrigin | undefined;
   agentId?: string | undefined;
   engine: EngineType;
   title: string;
@@ -194,6 +203,25 @@ export interface ArtifactRecord {
   } | undefined;
 }
 
+export interface RunOrigin {
+  kind: "direct" | "conversation" | "automation" | "team";
+  projectId?: string | undefined;
+  teamId?: string | undefined;
+  teamRunId?: string | undefined;
+  teamStepId?: string | undefined;
+  collaborationSessionId?: string | undefined;
+  collaborationMode?:
+    | "workflow"
+    | "facilitated_discussion"
+    | "roundtable"
+    | "debate"
+    | "delegation"
+    | "ad_hoc"
+    | undefined;
+  collaborationRound?: number | undefined;
+  automationId?: string | undefined;
+}
+
 export interface CreateRunInput {
   prompt: string;
   agentId?: string | undefined;
@@ -218,6 +246,8 @@ export interface RunRecord {
   engine: EngineType;
   status: RunStatus;
   request: CreateRunInput;
+  origin?: RunOrigin;
+  trace?: TraceContext;
   workspace?: WorkspaceLease;
   createdAt: string;
   updatedAt: string;
@@ -233,7 +263,29 @@ export interface RunEvent {
   sequence: number;
   type: string;
   timestamp: string;
+  traceId?: string;
+  spanId?: string;
+  parentSpanId?: string;
+  category?: ObservabilityEventCategory;
+  severity?: ObservabilitySeverity;
   payload: Record<string, unknown>;
+}
+
+export type ObservabilityEventCategory =
+  | "lifecycle"
+  | "model"
+  | "tool"
+  | "approval"
+  | "artifact"
+  | "log"
+  | "system";
+
+export type ObservabilitySeverity = "debug" | "info" | "warning" | "error";
+
+export interface TraceContext {
+  traceId: string;
+  rootSpanId: string;
+  parentSpanId?: string;
 }
 
 export function isTerminalStatus(status: RunStatus): boolean {

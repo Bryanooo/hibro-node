@@ -23,7 +23,9 @@ export const CONSOLE_HTML = `<!doctype html>
         <nav aria-label="控制台导航">
           <button type="button" class="nav-button active" data-view="dashboard" aria-label="总览"><span>⌂</span><b>总览</b></button>
           <button type="button" class="nav-button" data-view="agents" aria-label="Agents"><span>◎</span><b>Agents</b><em id="nav-agent-count">0</em></button>
+          <button type="button" class="nav-button" data-view="definitions" aria-label="Agent 源码"><span>⌘</span><b>Agent 源码</b><em id="nav-revision-count">0</em></button>
           <button type="button" class="nav-button" data-view="conversations" aria-label="Agent 对话"><span>◌</span><b>Agent 对话</b><em id="nav-conversation-count">0</em></button>
+          <button type="button" class="nav-button" data-view="observability" aria-label="观测中心"><span>⌁</span><b>观测中心</b><em id="nav-trace-count">0</em></button>
           <button type="button" class="nav-button" data-view="runs" aria-label="运行"><span>▶</span><b>运行</b><em id="nav-run-count">0</em></button>
           <button type="button" class="nav-button" data-view="artifacts" aria-label="产出"><span>◇</span><b>产出</b><em id="nav-artifact-count">0</em></button>
           <button type="button" class="nav-button" data-view="workspaces" aria-label="Agent 空间"><span>▣</span><b>Agent 空间</b></button>
@@ -115,6 +117,23 @@ export const CONSOLE_HTML = `<!doctype html>
           <div class="empty-state large" id="agents-empty" hidden><b>没有符合条件的 Agent</b><p>调整筛选条件，或创建一个新的本地 Agent。</p></div>
         </section>
 
+        <section class="view" id="view-definitions" data-view-panel="definitions">
+          <div class="info-callout"><span>i</span><div><b>Agent as Code 本地运行</b><p>Node 可以独立从目录导入 Agent 源码。源码目录只读，编译结果与版本保存在 .hibro/agents 下；连接 Core 后也会接收可靠部署。</p></div></div>
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">LOCAL IMPORT</p><h2>导入 agent.yaml 源码包</h2></div></div>
+            <form id="agent-package-import-form" class="package-import-form">
+              <label>源码目录<input id="agent-package-path" required placeholder="/workspace/project/agents/equity-research" /></label>
+              <label>更新现有 Agent（可选）<select id="agent-package-target"><option value="">创建新的 Agent</option></select></label>
+              <button type="submit" class="primary-button">校验、编译并激活</button>
+            </form>
+          </article>
+          <article class="panel package-revisions-panel">
+            <div class="panel-head"><div><p class="eyebrow">IMMUTABLE REVISIONS</p><h2>已安装版本</h2></div></div>
+            <div class="table-scroller"><table><thead><tr><th>Agent</th><th>Revision</th><th>引擎</th><th>来源</th><th>内容哈希</th><th>状态</th><th></th></tr></thead><tbody id="agent-revisions-body"></tbody></table></div>
+            <div class="empty-state" id="agent-revisions-empty" hidden><b>尚无 Agent 源码版本</b><p>可以从本机目录导入，或由 Hibro Core 部署。</p></div>
+          </article>
+        </section>
+
         <section class="view" id="view-conversations" data-view-panel="conversations">
           <div class="conversation-shell">
             <aside class="conversation-list-panel">
@@ -133,6 +152,18 @@ export const CONSOLE_HTML = `<!doctype html>
               </div>
             </article>
           </div>
+        </section>
+
+        <section class="view" id="view-observability" data-view-panel="observability">
+          <div class="metrics-grid">
+            <article class="metric-card"><span>LOCAL TRACES</span><strong id="obs-run-count">0</strong><small>当前保留窗口</small></article>
+            <article class="metric-card"><span>SUCCESS RATE</span><strong id="obs-success-rate">—</strong><small>终态运行成功率</small></article>
+            <article class="metric-card"><span>ACTIVE</span><strong id="obs-active-count">0</strong><small>本机正在执行</small></article>
+            <article class="metric-card"><span>ARTIFACTS</span><strong id="obs-artifact-count">0</strong><small>本地产物</small></article>
+          </div>
+          <div class="section-toolbar"><div><p class="eyebrow">TRACE EXPLORER</p><h2>本机执行追踪</h2></div><div class="toolbar-actions"><select id="obs-agent-filter"><option value="">全部 Agent</option></select><select id="obs-status-filter"><option value="">全部状态</option><option value="running">运行中</option><option value="completed">已完成</option><option value="failed">失败</option><option value="timed_out">超时</option></select></div></div>
+          <article class="table-panel"><div class="table-scroll"><table><thead><tr><th>Trace / 目标</th><th>Agent</th><th>状态</th><th>耗时</th><th>事件</th><th>工具</th><th>产物</th></tr></thead><tbody id="obs-trace-body"></tbody></table></div><div class="empty-state large" id="obs-empty" hidden><b>还没有 Trace</b><p>Agent 开始运行后，结构化事件会保存在本机 SQLite 中。</p></div></article>
+          <div class="info-callout"><span>i</span><div><b>Node 是原始观测数据源</b><p>日志会先在本地脱敏并落盘；连接 Core 后可靠同步。Core 负责跨节点聚合、权限和 Team 回放。</p></div></div>
         </section>
 
         <section class="view" id="view-runs" data-view-panel="runs">
@@ -182,12 +213,12 @@ export const CONSOLE_HTML = `<!doctype html>
 
         <section class="view" id="view-engines" data-view-panel="engines">
           <div class="section-toolbar">
-            <div><p class="toolbar-title">CLI 引擎检测</p><span class="toolbar-note">显示安装、认证和版本状态</span></div>
+            <div><p class="toolbar-title">Agent 引擎生命周期</p><span class="toolbar-note">按需安装、升级、启停并检查认证状态</span></div>
             <button type="button" class="secondary-button" id="recheck-engines">↻ 重新检测</button>
           </div>
           <div class="engine-grid" id="engine-grid"></div>
           <div class="info-callout compact">
-            <span>i</span><div><b>引擎路径来自启动环境</b><p>容器中通过镜像内 CLI 和挂载的认证配置运行；宿主机模式可用 HIBRO_CLAUDE_BIN、HIBRO_CODEX_BIN、HIBRO_OPENCLAW_BIN 覆盖。</p></div>
+            <span>i</span><div><b>安装与认证彼此独立</b><p>Node 只从官方白名单安装精确版本到 .hibro/engines；Token 与登录信息不会写入安装记录。镜像内置或宿主机已有的 CLI 也可以继续使用。</p></div>
           </div>
         </section>
 
@@ -506,6 +537,11 @@ input:focus, textarea:focus, select:focus { border-color: #66764b; box-shadow: 0
 .info-callout > span { width: 22px; height: 22px; flex: 0 0 auto; display: grid; place-items: center; border: 1px solid var(--blue); border-radius: 50%; color: var(--blue); font: 9px/1 var(--mono); }
 .info-callout b { display: block; font-size: 10px; }
 .info-callout p { margin: 5px 0 0; color: #899bb6; font-size: 9px; line-height: 1.5; }
+.package-import-form { display: grid; grid-template-columns: minmax(280px,1fr) minmax(220px,.5fr) auto; gap: 12px; align-items: end; }
+.package-import-form label { display: grid; gap: 7px; color: var(--muted); font-size: 10px; }
+.package-import-form input,.package-import-form select { width: 100%; height: 40px; border: 1px solid var(--line); background: #0c0f13; color: var(--text); padding: 0 11px; }
+.package-import-form button { height: 40px; }
+.package-revisions-panel { margin-top: 15px; }
 #view-workspaces table { min-width: 1040px; }
 .engine-grid { display: grid; grid-template-columns: repeat(3, minmax(240px,1fr)); gap: 13px; }
 .engine-card { min-width: 0; padding: 19px; border: 1px solid var(--border); background: var(--panel); }
@@ -517,6 +553,10 @@ input:focus, textarea:focus, select:focus { border-color: #66764b; box-shadow: 0
 .engine-card dt { color: var(--quiet); font-size: 9px; }
 .engine-card dd { margin: 0; color: #aeb5bf; font: 8px/1.5 var(--mono); overflow-wrap: anywhere; }
 .engine-error { margin: 13px 0 0; padding: 9px; color: #d99398; background: var(--red-dim); font-size: 8px; line-height: 1.5; }
+.engine-actions { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 8px; }
+.engine-actions button { min-height: 34px; padding: 0 11px; }
+.engine-card details { margin-top: 14px; color: var(--muted); font-size: 9px; }
+.engine-card details pre { max-height: 180px; overflow: auto; padding: 10px; background: #090b0e; color: #9fa7b2; white-space: pre-wrap; }
 .settings-layout { display: grid; grid-template-columns: minmax(0,1.3fr) minmax(300px,.7fr); gap: 15px; align-items: start; }
 .settings-form .form-body { padding: 20px; }
 .field-grid { display: grid; gap: 12px; }
@@ -705,14 +745,19 @@ label > small { display: block; margin-top: 6px; color: var(--quiet); font-size:
 export const CONSOLE_JS = `const state = {
   view: "dashboard",
   agents: [],
+  revisions: [],
   conversations: [],
   conversationDetail: null,
   selectedConversationId: null,
   conversationEvents: null,
   runs: [],
   artifacts: [],
+  observability: null,
+  traces: [],
+  extensions: null,
   workspaces: [],
   capabilities: { engines: [], core: {} },
+  engineCatalog: [],
   settings: null,
   system: null,
   health: null,
@@ -734,7 +779,9 @@ const statusLabels = {
 const viewMeta = {
   dashboard: ["NODE OVERVIEW", "运行总览", "本地 Agent、引擎和运行状态的实时视图"],
   agents: ["AGENT REGISTRY", "Agents", "配置本机运行的 Agent 身份、引擎、目录与权限"],
+  definitions: ["AGENT AS CODE", "Agent 源码", "导入、检查、激活和回滚本机 Agent 的不可变版本"],
   conversations: ["AGENT CONVERSATIONS", "Agent 对话", "直接与本机 Agent 对话，并查看思考、工具调用和审批事件"],
+  observability: ["HIBRO OBSERVABILITY", "观测中心", "查看本机 Trace、结构化事件、工具调用、错误和产物"],
   runs: ["EXECUTION HISTORY", "运行记录", "跟踪任务状态、事件、会话和最终结果"],
   artifacts: ["OUTPUT ARCHIVE", "产出归档", "查看、复制和下载 Agent 的最终输出"],
   workspaces: ["AGENT SPACES", "Agent 专属空间", "查看每个 Agent 真正工作的目录、权限和运行状态"],
@@ -906,7 +953,9 @@ function closeDialog(id) {
 
 function renderNavigation() {
   byId("nav-agent-count").textContent = String(state.agents.length);
+  byId("nav-revision-count").textContent = String(state.revisions.length);
   byId("nav-conversation-count").textContent = String(state.conversations.length);
+  byId("nav-trace-count").textContent = String(state.traces.length);
   byId("nav-run-count").textContent = String(state.runs.length);
   byId("nav-artifact-count").textContent = String(state.artifacts.length);
   const managed = state.capabilities.engines;
@@ -1048,7 +1097,7 @@ function renderAgents() {
     head.append(name, statusNode(runtime.status));
     card.append(head, el("p", "agent-description", agent.description || "未填写 Agent 描述"));
     const tags = el("div", "tag-list");
-    [engineLabel(agent.engine), workspaceLabel(agent.workspace.strategy), accessLabel(agent.workspace.access), approvalPolicyLabel(agent.approvalPolicy), "并发 " + agent.maxConcurrency, agent.model || "默认模型"].forEach((value) => tags.append(el("span", "tag", value)));
+    [engineLabel(agent.engine), agent.package ? "Revision " + agent.package.revision : "传统配置", workspaceLabel(agent.workspace.strategy), accessLabel(agent.workspace.access), approvalPolicyLabel(agent.approvalPolicy), "并发 " + agent.maxConcurrency, agent.model || "默认模型"].forEach((value) => tags.append(el("span", "tag", value)));
     card.append(
       tags,
       el("code", "agent-path", agent.source?.path
@@ -1075,6 +1124,65 @@ function renderAgents() {
     grid.append(card);
   }
   byId("agents-empty").hidden = agents.length > 0;
+}
+
+function renderAgentRevisions() {
+  const body = byId("agent-revisions-body");
+  clear(body);
+  for (const revision of state.revisions) {
+    const row = document.createElement("tr");
+    const runtime = agentRuntime(revision.agentId);
+    [
+      (runtime?.agent.name || revision.agentId) + "\\n" + shortId(revision.agentId, 12),
+      "Revision " + revision.revision + "\\n" + shortId(revision.revisionId, 16),
+      engineLabel(revision.manifest.spec.engine),
+      revision.origin === "hibro-core" ? "Hibro Core" : "本地导入",
+      revision.contentHash.slice(0, 16),
+    ].forEach((value) => {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      cell.style.whiteSpace = "pre-line";
+      row.append(cell);
+    });
+    const stateCell = document.createElement("td");
+    stateCell.append(statusNode(revision.status === "active" ? "completed" : "archived"));
+    stateCell.lastChild.textContent = revision.status === "active" ? "已激活" : "历史版本";
+    row.append(stateCell);
+    const actionCell = document.createElement("td");
+    if (revision.status !== "active") {
+      const activate = el("button", "small-button", "回滚到此版本");
+      activate.type = "button";
+      activate.addEventListener("click", async () => {
+        try {
+          await json("/v1/agents/" + encodeURIComponent(revision.agentId) + "/activate", {
+            method: "POST",
+            headers: {"content-type":"application/json"},
+            body: JSON.stringify({revisionId: revision.revisionId}),
+          });
+          notify("Agent 已切换到 Revision " + revision.revision);
+          await refresh();
+        } catch (error) { notify(error.message, "error"); }
+      });
+      actionCell.append(activate);
+    }
+    row.append(actionCell);
+    body.append(row);
+  }
+  byId("agent-revisions-empty").hidden = state.revisions.length > 0;
+  const target = byId("agent-package-target");
+  const selected = target.value;
+  clear(target);
+  const fresh = document.createElement("option");
+  fresh.value = "";
+  fresh.textContent = "创建新的 Agent";
+  target.append(fresh);
+  for (const runtime of state.agents) {
+    const option = document.createElement("option");
+    option.value = runtime.agent.id;
+    option.textContent = runtime.agent.name + " · " + engineLabel(runtime.agent.engine);
+    target.append(option);
+  }
+  if ([...target.options].some((option) => option.value === selected)) target.value = selected;
 }
 
 function renderConversations() {
@@ -1304,6 +1412,75 @@ function renderRuns() {
   byId("runs-empty").hidden = runs.length > 0;
 }
 
+function renderObservability() {
+  const overview = state.observability;
+  if (!overview) return;
+  byId("obs-run-count").textContent = String(overview.runs.total);
+  byId("obs-success-rate").textContent = overview.runs.successRate == null
+    ? "—"
+    : Math.round(overview.runs.successRate * 100) + "%";
+  byId("obs-active-count").textContent = String(overview.runs.active);
+  byId("obs-artifact-count").textContent = String(overview.artifacts);
+  const agentFilter = byId("obs-agent-filter");
+  const previous = agentFilter.value;
+  clear(agentFilter);
+  const all = document.createElement("option");
+  all.value = "";
+  all.textContent = "全部 Agent";
+  agentFilter.append(all);
+  for (const runtime of state.agents) {
+    const option = document.createElement("option");
+    option.value = runtime.agent.id;
+    option.textContent = runtime.agent.name;
+    agentFilter.append(option);
+  }
+  if ([...agentFilter.options].some((option) => option.value === previous)) agentFilter.value = previous;
+  const status = byId("obs-status-filter").value;
+  const traces = state.traces.filter((trace) =>
+    (!agentFilter.value || trace.agentId === agentFilter.value) &&
+    (!status || trace.status === status),
+  );
+  const body = byId("obs-trace-body");
+  clear(body);
+  for (const trace of traces) {
+    const row = document.createElement("tr");
+    row.tabIndex = 0;
+    row.setAttribute("role", "button");
+    row.addEventListener("click", () => openRunDetail(trace.runId));
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") openRunDetail(trace.runId);
+    });
+    const goal = document.createElement("td");
+    goal.append(el("b", "", trace.prompt), el("small", "", shortId(trace.traceId) + " · " + shortId(trace.runId)));
+    const agent = document.createElement("td");
+    agent.append(el("b", "", trace.agentName), el("small", "", engineLabel(trace.engine)));
+    row.append(
+      goal,
+      agent,
+      cell(statusNode(trace.status)),
+      cell(el("span", "", formatMilliseconds(trace.durationMs))),
+      cell(el("span", "", trace.eventCount + (trace.errors ? " · " + trace.errors + " 错误" : ""))),
+      cell(el("span", "", trace.toolCalls + (trace.approvals ? " · " + trace.approvals + " 审批" : ""))),
+      cell(el("span", "", String(trace.artifactCount))),
+    );
+    body.append(row);
+  }
+  byId("obs-empty").hidden = traces.length > 0;
+}
+
+function cell(child) {
+  const value = document.createElement("td");
+  value.append(child);
+  return value;
+}
+
+function formatMilliseconds(value) {
+  const milliseconds = Math.max(0, Number(value) || 0);
+  if (milliseconds < 1000) return milliseconds + " ms";
+  if (milliseconds < 60000) return (milliseconds / 1000).toFixed(1) + " s";
+  return Math.floor(milliseconds / 60000) + "m " + Math.round(milliseconds % 60000 / 1000) + "s";
+}
+
 function filteredArtifacts() {
   const query = byId("artifact-search").value.trim().toLowerCase();
   return state.artifacts.filter((artifact) => {
@@ -1403,23 +1580,92 @@ function renderWorkspaces() {
 function renderEngines() {
   const grid = byId("engine-grid");
   clear(grid);
-  for (const engine of state.capabilities.engines) {
+  for (const engine of state.engineCatalog.length ? state.engineCatalog : state.capabilities.engines) {
     const card = el("article", "engine-card");
     card.dataset.engineId = engine.id;
     const head = el("div", "engine-card-head");
     head.append(el("span", "engine-logo", engine.id === "claude-code" ? "C" : engine.id === "codex" ? "X" : "O"));
     const title = el("div");
-    title.append(el("h3", "", engineLabel(engine.id)), statusNode(engine.available ? "idle" : "unavailable"));
+    title.append(el("h3", "", engineLabel(engine.id)), statusNode(engine.ready || engine.available ? "idle" : engine.enabled === false ? "disabled" : "unavailable"));
     head.append(title);
     const list = document.createElement("dl");
-    [["版本", engine.version || "—"], ["可执行文件", engine.executable || "—"], ["安装", engine.installed ? "已安装" : "未安装"], ["认证", engine.loggedIn === undefined ? "不适用" : engine.loggedIn ? "已认证" : "未认证"], ["认证方式", engine.authMethod || engine.credentialSource || "—"]].forEach((pair) => {
+    [["运行版本", engine.runtimeVersion || engine.version || "—"], ["推荐版本", engine.recommendedVersion || "—"], ["可执行文件", engine.runtimeExecutable || engine.executable || "—"], ["来源", engine.source === "managed" ? "Hibro 管理" : engine.source === "bundled" ? "镜像内置" : engine.source === "external" ? "系统已有" : "未安装"], ["认证", engine.loggedIn === undefined ? "不适用" : engine.loggedIn ? "已认证" : "未认证"], ["认证方式", engine.authMethod || engine.credentialSource || "—"]].forEach((pair) => {
       const row = document.createElement("div");
       row.append(el("dt", "", pair[0]), el("dd", "", pair[1]));
       list.append(row);
     });
     card.append(head, list);
     if (engine.error) card.append(el("p", "engine-error", engine.error));
+    if (engine.lastError && engine.lastError !== engine.error) card.append(el("p", "engine-error", "最近操作：" + engine.lastError));
+    if (engine.packageName) {
+      const actions = el("div", "engine-actions");
+      if (!engine.installed) actions.append(engineActionButton(engine.id, "install", "安装推荐版本", "primary-button"));
+      if (engine.installed && engine.source !== "managed") actions.append(engineActionButton(engine.id, "install", "转为 Hibro 托管", "primary-button"));
+      if (engine.source === "managed" && engine.installedVersion !== engine.recommendedVersion) actions.append(engineActionButton(engine.id, "update", "升级到推荐版本", "primary-button"));
+      actions.append(engineActionButton(engine.id, engine.enabled === false ? "enable" : "disable", engine.enabled === false ? "启用" : "停用", "secondary-button"));
+      if (engine.source === "managed") actions.append(engineActionButton(engine.id, "uninstall", "卸载托管版本", "danger-button"));
+      card.append(actions);
+      if ((engine.installedVersions || []).length > 1) {
+        const versions = el("div", "engine-actions");
+        const select = document.createElement("select");
+        for (const version of engine.installedVersions) {
+          const option = document.createElement("option");
+          option.value = version;
+          option.textContent = version + (version === engine.installedVersion ? "（当前）" : "");
+          select.append(option);
+        }
+        select.value = engine.installedVersion;
+        const activate = el("button", "secondary-button", "切换版本");
+        activate.type = "button";
+        activate.addEventListener("click", () => performEngineAction(engine.id, "activate", activate, {version: select.value}));
+        versions.append(select, activate);
+        card.append(versions);
+      }
+      if (engine.lastOperation) {
+        const details = document.createElement("details");
+        const summary = document.createElement("summary");
+        summary.textContent = "最近安装日志 · " + (engine.lastOperation.success === false ? "失败" : engine.lastOperation.success ? "成功" : "进行中");
+        const log = document.createElement("pre");
+        log.textContent = (engine.lastOperation.log || []).join("\\n") || "暂无输出";
+        details.append(summary, log);
+        card.append(details);
+      }
+    }
     grid.append(card);
+  }
+}
+
+function engineActionButton(engineId, action, label, className) {
+  const button = el("button", className, label);
+  button.type = "button";
+  button.addEventListener("click", () => performEngineAction(engineId, action, button));
+  return button;
+}
+
+async function performEngineAction(engineId, action, button, payload) {
+  const destructive = action === "uninstall";
+  const execute = async () => {
+    button.disabled = true;
+    const labels = {install:"安装",update:"升级",activate:"切换",enable:"启用",disable:"停用",uninstall:"卸载"};
+    try {
+      notify((labels[action] || action) + "正在执行，请稍候…");
+      await json("/v1/engines/" + encodeURIComponent(engineId) + "/" + action, {
+        method: "POST",
+        headers: {"content-type":"application/json"},
+        body: JSON.stringify(payload || {}),
+      });
+      await refresh();
+      notify(engineLabel(engineId) + " 已" + (labels[action] || action));
+    } catch (error) { notify(error.message, "error"); }
+    finally { button.disabled = false; }
+  };
+  if (destructive) {
+    confirmAction("卸载 " + engineLabel(engineId), "只删除 Hibro 管理的引擎版本，不会删除 Agent、工作空间、运行记录或系统自带 CLI。", async () => {
+      closeDialog("confirm-dialog");
+      await execute();
+    });
+  } else {
+    await execute();
   }
 }
 
@@ -1486,7 +1732,9 @@ function renderAll() {
   renderDashboardEngines();
   renderDashboardRuns();
   renderAgents();
+  renderAgentRevisions();
   renderConversations();
+  renderObservability();
   renderRuns();
   renderArtifacts();
   renderWorkspaces();
@@ -1498,19 +1746,25 @@ async function refresh(options) {
   const quiet = options?.quiet === true;
   if (!quiet) byId("refresh-button").classList.add("spinning");
   try {
-    const [health, capabilities, agents, conversations, runs, artifacts, workspaces, settings, system] = await Promise.all([
-      json("/health"), json("/v1/capabilities"), json("/v1/agents"), json("/v1/conversations"),
+    const [health, capabilities, engines, agents, revisions, conversations, runs, artifacts, workspaces, settings, system, observability, traces, extensions] = await Promise.all([
+      json("/health"), json("/v1/capabilities"), json("/v1/engines"), json("/v1/agents"), json("/v1/agent-revisions"), json("/v1/conversations"),
       json("/v1/runs"), json("/v1/artifacts"), json("/v1/workspaces"), json("/v1/settings"), json("/v1/system"),
+      json("/v1/observability/overview"), json("/v1/observability/traces?limit=100"), json("/v1/extensions"),
     ]);
     state.health = health;
     state.capabilities = capabilities;
+    state.engineCatalog = engines.engines || [];
     state.agents = agents.agents || [];
+    state.revisions = revisions.revisions || [];
     state.conversations = conversations.conversations || [];
     state.runs = runs.runs || [];
     state.artifacts = artifacts.artifacts || [];
     state.workspaces = workspaces.workspaces || [];
     state.settings = settings;
     state.system = system;
+    state.observability = observability;
+    state.traces = traces.traces || [];
+    state.extensions = extensions;
     renderAll();
     byId("last-refresh").textContent = "更新于 " + new Intl.DateTimeFormat("zh-CN", {hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false}).format(new Date());
   } catch (error) {
@@ -1947,6 +2201,26 @@ byId("quick-new-run").addEventListener("click", () => openRunDialog());
 byId("runs-new-run").addEventListener("click", () => openRunDialog());
 byId("quick-new-agent").addEventListener("click", () => openAgentDialog());
 byId("new-agent-button").addEventListener("click", () => openAgentDialog());
+byId("agent-package-import-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = event.submitter;
+  if (button) button.disabled = true;
+  try {
+    const target = byId("agent-package-target").value;
+    await json("/v1/agent-packages/import", {
+      method: "POST",
+      headers: {"content-type":"application/json"},
+      body: JSON.stringify({
+        path: byId("agent-package-path").value.trim(),
+        ...(target ? {agentId: target} : {}),
+      }),
+    });
+    notify(target ? "新 Revision 已编译并激活" : "Agent 源码已导入并激活");
+    byId("agent-package-import-form").reset();
+    await refresh();
+  } catch (error) { notify(error.message, "error"); }
+  finally { if (button) button.disabled = false; }
+});
 byId("refresh-button").addEventListener("click", () => refresh());
 byId("banner-action").addEventListener("click", () => setView("engines"));
 byId("run-agent").addEventListener("change", updateRunPreview);
@@ -1966,6 +2240,8 @@ byId("agent-engine-filter").addEventListener("change", renderAgents);
 byId("run-search").addEventListener("input", renderRuns);
 byId("run-agent-filter").addEventListener("change", renderRuns);
 byId("run-status-filter").addEventListener("change", renderRuns);
+byId("obs-agent-filter").addEventListener("change", renderObservability);
+byId("obs-status-filter").addEventListener("change", renderObservability);
 byId("artifact-search").addEventListener("input", renderArtifacts);
 byId("agent-form").addEventListener("submit", saveAgent);
 byId("run-form").addEventListener("submit", submitRun);

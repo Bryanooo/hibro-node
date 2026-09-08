@@ -14,6 +14,7 @@ env_file="${HIBRO_SETUP_ENV_FILE:-${config_dir}/hibro-node.env}"
 port_arg=""
 project_root_arg=""
 service_user_arg=""
+engines_arg=""
 
 usage() {
   cat <<'EOF'
@@ -21,9 +22,9 @@ Hibro Node Linux Native 一键部署
 
 用法：
   sudo ./scripts/setup.sh --mode native [--env-file PATH] [--port PORT]
-       [--project-root PATH] [--service-user USER]
+       [--project-root PATH] [--service-user USER] [--engines LIST]
 
-脚本安装 Node 运行时、三种 Agent CLI 和 systemd 服务。服务默认以 sudo 发起者运行，
+脚本安装 Node 运行时、选定的 Agent CLI 和 systemd 服务。服务默认以 sudo 发起者运行，
 从而复用该用户已有的 Claude/Codex/OpenClaw 登录信息。
 EOF
 }
@@ -48,6 +49,11 @@ while (($# > 0)); do
     --service-user)
       [[ $# -ge 2 ]] || { echo "--service-user 缺少参数" >&2; exit 2; }
       service_user_arg="$2"
+      shift 2
+      ;;
+    --engines)
+      [[ $# -ge 2 ]] || { echo "--engines 缺少参数" >&2; exit 2; }
+      engines_arg="$2"
       shift 2
       ;;
     -h|--help)
@@ -89,7 +95,6 @@ node_major="$(node -p 'Number(process.versions.node.split(".")[0])')"
   echo "Native 模式要求 Node.js 24 或更高版本，当前为 $(node --version)。" >&2
   exit 1
 }
-
 service_user="${service_user_arg:-${SUDO_USER:-$(id -un)}}"
 [[ "${service_user}" =~ ^[A-Za-z_][A-Za-z0-9_.-]*$ ]] ||
   { echo "服务用户名不合法。" >&2; exit 1; }
@@ -152,6 +157,18 @@ prompt_value() {
 }
 
 existing_data_dir="$(read_env_value HIBRO_NODE_DATA_DIR)"
+existing_engines="$(read_env_value HIBRO_MANAGED_ENGINES)"
+engines_arg="${engines_arg:-${existing_engines:-all}}"
+if [[ "${engines_arg}" != "all" && "${engines_arg}" != "none" ]]; then
+  IFS=',' read -r -a requested_engines <<<"${engines_arg}"
+  ((${#requested_engines[@]} > 0)) || { echo "--engines 不能为空" >&2; exit 1; }
+  for engine in "${requested_engines[@]}"; do
+    [[ "${engine}" == "claude-code" || "${engine}" == "codex" || "${engine}" == "openclaw" ]] || {
+      echo "不支持的引擎：${engine}" >&2
+      exit 1
+    }
+  done
+fi
 data_dir="${data_dir:-${existing_data_dir:-${service_home}/.hibro}}"
 node_port="${port_arg:-$(read_env_value HIBRO_NODE_PORT)}"
 project_root="${project_root_arg:-$(read_env_value HIBRO_DEFAULT_PROJECT_ROOT)}"
@@ -182,6 +199,8 @@ if [[ ! -f "${env_file}" ]]; then
       printf 'HIBRO_NODE_DATA_DIR=%s\n' "${data_dir}"
       printf 'HIBRO_DEFAULT_PROJECT_ROOT=%s\n' "${project_root}"
       printf 'HIBRO_IMPORT_SHELL_ENV=false\n'
+      printf 'HIBRO_NPM_REGISTRY=%s\n' "${HIBRO_NPM_REGISTRY:-https://registry.npmjs.org}"
+      printf 'HIBRO_MANAGED_ENGINES=%s\n' "${engines_arg}"
       printf 'ANTHROPIC_API_KEY=%s\n' "${ANTHROPIC_API_KEY:-}"
       printf 'ANTHROPIC_AUTH_TOKEN=%s\n' "${ANTHROPIC_AUTH_TOKEN:-}"
       printf 'ANTHROPIC_BASE_URL=%s\n' "${ANTHROPIC_BASE_URL:-}"
@@ -196,17 +215,13 @@ set_env_value HIBRO_NODE_PORT "${node_port}"
 set_env_value HIBRO_NODE_DATA_DIR "${data_dir}"
 set_env_value HIBRO_DEFAULT_PROJECT_ROOT "${project_root}"
 set_env_value HIBRO_IMPORT_SHELL_ENV "false"
+set_env_value HIBRO_MANAGED_ENGINES "${engines_arg}"
+if [[ -z "$(read_env_value HIBRO_NPM_REGISTRY)" ]]; then
+  set_env_value HIBRO_NPM_REGISTRY "${HIBRO_NPM_REGISTRY:-https://registry.npmjs.org}"
+fi
 chmod 0640 "${env_file}"
 if [[ "${skip_systemd}" != "true" ]]; then
   chown "root:${service_group}" "${env_file}"
-fi
-
-if [[ "${skip_engines}" != "true" ]]; then
-  echo "正在安装 Claude Code、Codex 与 OpenClaw CLI……"
-  npm install --global \
-    "@anthropic-ai/claude-code@2.1.218" \
-    "@openai/codex@0.145.0" \
-    "openclaw@2026.7.1-2"
 fi
 
 echo "正在安装 Hibro Node 运行文件……"
@@ -214,11 +229,36 @@ release_id="$(date -u +%Y%m%d%H%M%S)-$$"
 release_dir="${install_dir}/releases/${release_id}"
 install -d -m 0755 "${release_dir}"
 cp -R "${repo_dir}/src" "${repo_dir}/assets" "${release_dir}/"
+install -d -m 0755 "${release_dir}/scripts"
+install -m 0644 "${repo_dir}/scripts/backup-database.ts" "${release_dir}/scripts/backup-database.ts"
+install -m 0644 "${repo_dir}/scripts/restore-database.ts" "${release_dir}/scripts/restore-database.ts"
 install -m 0644 "${repo_dir}/package.json" "${release_dir}/package.json"
 install -m 0644 "${repo_dir}/package-lock.json" "${release_dir}/package-lock.json"
-(cd "${release_dir}" && npm ci --omit=dev)
+(cd "${release_dir}" && npm ci --omit=dev --registry="$(read_env_value HIBRO_NPM_REGISTRY)")
 chmod -R u=rwX,go=rX "${release_dir}"
 ln -sfn "${release_dir}" "${install_dir}/current"
+
+if [[ "${skip_engines}" != "true" && "${engines_arg}" != "none" ]]; then
+  if [[ "${engines_arg}" == "all" ]]; then
+    selected_engines=(claude-code codex openclaw)
+  else
+    IFS=',' read -r -a selected_engines <<<"${engines_arg}"
+  fi
+  echo "正在把 Agent 引擎安装到 ${data_dir}/engines……"
+  engine_registry="$(read_env_value HIBRO_NPM_REGISTRY)"
+  for engine in "${selected_engines[@]}"; do
+    if [[ "${skip_systemd}" == "true" ]]; then
+      HIBRO_NODE_DATA_DIR="${data_dir}" HIBRO_NPM_REGISTRY="${engine_registry}" \
+        "${node_binary}" --experimental-strip-types \
+        "${release_dir}/src/cli.ts" engine install "${engine}"
+    else
+      runuser -u "${service_user}" -- env HIBRO_NODE_DATA_DIR="${data_dir}" \
+        HIBRO_NPM_REGISTRY="${engine_registry}" \
+        "${node_binary}" --experimental-strip-types "${release_dir}/src/cli.ts" \
+        engine install "${engine}"
+    fi
+  done
+fi
 
 unit_file="${systemd_dir}/${service_name}.service"
 install -d -m 0755 "${systemd_dir}"

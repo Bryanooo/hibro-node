@@ -5,6 +5,7 @@ export * from "./identity.ts";
 export * from "./claude-code-adapter.ts";
 export * from "./codex-adapter.ts";
 export * from "./openclaw-adapter.ts";
+export * from "./engine-manager.ts";
 export * from "./engine-adapter.ts";
 export * from "./agent-registry.ts";
 export * from "./workspace-manager.ts";

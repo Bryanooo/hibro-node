@@ -12,6 +12,7 @@ import { writeJsonAtomically } from "./storage.ts";
 import { selectEngineEnvironment } from "./engine-environment.ts";
 import { createId } from "./identity.ts";
 import { PausableExecutionTimeout } from "./execution-timeout.ts";
+import { processGroupOptions, terminateProcessTree } from "./process-lifecycle.ts";
 
 interface CommandResult {
   exitCode: number;
@@ -34,18 +35,21 @@ interface OpenClawJsonResult extends Record<string, unknown> {
 
 export interface OpenClawAdapterOptions {
   executable?: string | undefined;
+  resolveExecutable?: ((fallback: string) => string) | undefined;
   environment?: NodeJS.ProcessEnv | undefined;
   defaultModel?: string | undefined;
 }
 
 export class OpenClawAdapter implements AgentEngineAdapter {
   readonly engineType = "openclaw" as const;
-  readonly executable: string;
+  private readonly fallbackExecutable: string;
+  private readonly executableResolver?: ((fallback: string) => string) | undefined;
   private readonly environment: NodeJS.ProcessEnv;
   private readonly defaultModel: string;
 
   constructor(options: OpenClawAdapterOptions = {}) {
-    this.executable = options.executable ?? process.env.HIBRO_OPENCLAW_BIN ?? "openclaw";
+    this.fallbackExecutable = options.executable ?? process.env.HIBRO_OPENCLAW_BIN ?? "openclaw";
+    this.executableResolver = options.resolveExecutable;
     this.environment = selectEngineEnvironment("openclaw", options.environment);
     const providerModel =
       this.environment.ANTHROPIC_MODEL ?? "claude-sonnet-4-6";
@@ -55,6 +59,10 @@ export class OpenClawAdapter implements AgentEngineAdapter {
       (this.environment.ANTHROPIC_BASE_URL
         ? `hibro-anthropic/${providerModel}`
         : `anthropic/${providerModel}`);
+  }
+
+  get executable(): string {
+    return this.executableResolver?.(this.fallbackExecutable) ?? this.fallbackExecutable;
   }
 
   async doctor(): Promise<EngineDoctorResult> {
@@ -150,6 +158,7 @@ export class OpenClawAdapter implements AgentEngineAdapter {
       cwd: input.workspace,
       env: environment,
       stdio: ["ignore", "pipe", "pipe"],
+      ...processGroupOptions(),
     });
     let stdout = "";
     let stderr = "";
@@ -158,9 +167,7 @@ export class OpenClawAdapter implements AgentEngineAdapter {
 
     const terminate = (): void => {
       if (child.exitCode !== null || child.killed) return;
-      child.kill("SIGTERM");
-      forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 2_000);
-      forceKillTimer.unref();
+      forceKillTimer = terminateProcessTree(child);
     };
     const abortListener = (): void => terminate();
     input.signal?.addEventListener("abort", abortListener, { once: true });
@@ -326,6 +333,7 @@ export class OpenClawAdapter implements AgentEngineAdapter {
     return {
       ...this.environment,
       ANTHROPIC_API_KEY: apiKey,
+      ...input.environment,
       OPENCLAW_HOME: stateDir,
       OPENCLAW_STATE_DIR: stateDir,
       OPENCLAW_CONFIG_PATH: configPath,

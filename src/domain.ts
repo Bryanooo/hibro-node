@@ -145,10 +145,23 @@ export interface WorkspaceLease {
   materialization: "git-worktree" | "directory-copy" | "empty" | "scratch";
   writable: boolean;
   artifactPath?: string | undefined;
+  inputPath?: string | undefined;
   /** Legacy run-history compatibility. */
   mode?: WorkspaceMode | undefined;
   /** Legacy run-history compatibility. */
   projectRoot?: string | undefined;
+}
+
+export interface RunArtifactInput {
+  artifactId: string;
+  fileName: string;
+  contentType: string;
+  sizeBytes: number;
+  sha256: string;
+  url?: string | undefined;
+  headers?: Record<string, string> | undefined;
+  expiresAt?: string | undefined;
+  localPath?: string | undefined;
 }
 
 export interface SystemSettings {
@@ -232,6 +245,7 @@ export interface CreateRunInput {
   freshSession?: boolean | undefined;
   options?: EngineRunOptions;
   metadata?: Record<string, unknown>;
+  inputArtifacts?: RunArtifactInput[] | undefined;
 }
 
 export interface RunError {

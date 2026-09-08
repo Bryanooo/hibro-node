@@ -229,6 +229,14 @@ stateDiagram-v2
 
 ### `run.create`
 
+When the Node advertises `artifact-inputs-v1`, `run.create.payload.inputArtifacts` may contain up
+to 32 short-lived download grants. Each descriptor includes `artifactId`, `fileName`, `contentType`,
+`sizeBytes`, `sha256`, `url`, `headers` and `expiresAt`. Core stores only Artifact IDs in Run state
+and regenerates grants for every durable outbox delivery. Node downloads into a Run-scoped,
+read-only `.hibro-inputs/<run-id>` directory, verifies byte count and SHA-256 before starting the
+engine, never persists the URL or headers, and removes the directory after the Run. Input files are
+untrusted data rather than Agent instructions.
+
 `request.metadata.origin` carries the durable business correlation for a Run. Node persists it on both the Run and every discovered Artifact, then returns it unchanged in snapshots and artifact manifests:
 
 ```json

@@ -404,6 +404,7 @@ export class CoreTransport {
           "structured-run-events",
           "redacted-engine-logs",
           "engine-lifecycle-v1",
+          "artifact-inputs-v1",
         ],
         maxFrameBytes: 2_097_152,
       },

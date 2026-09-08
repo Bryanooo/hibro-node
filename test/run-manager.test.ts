@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { access, chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { once } from "node:events";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -75,6 +77,65 @@ test("passes Project secrets ephemerally without persisting their values", async
   assert.equal(observedSecret, "runtime-only-secret");
   assert.doesNotMatch(JSON.stringify(await instance.list()), /runtime-only-secret/);
   assert.doesNotMatch(JSON.stringify(await instance.eventsAfter(created.id)), /runtime-only-secret/);
+});
+
+test("downloads verified artifact inputs into a read-only run directory without persisting grants", async () => {
+  const content = Buffer.from("storyboard-binary-content");
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/octet-stream", "content-length": String(content.length) });
+    response.end(content);
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  let observedPath = "";
+  class InputAdapter implements AgentEngineAdapter {
+    readonly engineType = "claude-code" as const;
+    async doctor() { return { installed: true, ready: true }; }
+    async execute(input: EngineExecuteInput) {
+      const match = input.prompt.match(/:\s+(\/[^\s]+)\s+\(image\/png/);
+      assert.ok(match);
+      observedPath = match[1] as string;
+      assert.deepEqual(await readFile(observedPath), content);
+      return { result: "input verified" };
+    }
+  }
+  const root = await mkdtemp(join(tmpdir(), "hibro-artifact-input-"));
+  const workspace = join(root, "workspace");
+  await mkdir(workspace);
+  const instance = new RunManager({ adapter: new InputAdapter(), store: new FileRunStore(join(root, "store")) });
+  await instance.init();
+  const created = await instance.create({
+    prompt: "Render the next scene",
+    workspace,
+    inputArtifacts: [{
+      artifactId: "artifact_storyboard",
+      fileName: "storyboard.png",
+      contentType: "image/png",
+      sizeBytes: content.length,
+      sha256: createHash("sha256").update(content).digest("hex"),
+      url: `http://127.0.0.1:${address.port}/signed?token=temporary-secret`,
+      headers: { "x-temporary-secret": "do-not-persist" },
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    }],
+  });
+  const terminal = await instance.waitForTerminal(created.id);
+  assert.equal(terminal.status, "completed");
+  assert.equal(terminal.request.inputArtifacts?.[0]?.localPath, observedPath);
+  assert.doesNotMatch(JSON.stringify(terminal), /temporary-secret|do-not-persist/);
+  server.close();
+  await once(server, "close");
+  const cleanupDeadline = Date.now() + 2_000;
+  while (Date.now() < cleanupDeadline) {
+    try {
+      await access(observedPath);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    } catch {
+      break;
+    }
+  }
+  await assert.rejects(() => access(observedPath));
 });
 
 test("cancels an active run", async () => {

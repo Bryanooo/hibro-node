@@ -78,6 +78,7 @@ test("creates an Agent without a project and runs it in its private workspace", 
   await page.locator("#new-agent-button").click();
   await page.locator("#agent-name").fill(agentName);
   await page.locator("#agent-engine").selectOption("codex");
+  await page.locator('.agent-modality[value="image"]').check();
   await expect(page.locator("#agent-source-path")).toHaveValue("");
   await expect(page.locator("#agent-workspace-preview")).toContainText(
     "未配置默认项目，将使用空白空间",
@@ -91,8 +92,9 @@ test("creates an Agent without a project and runs it in its private workspace", 
   await page.locator("#save-agent").click();
   const createResponse = await createResponsePromise;
   expect(createResponse.status()).toBe(201);
-  const created = (await createResponse.json()) as { id: string };
+  const created = (await createResponse.json()) as { id: string; modalities?: string[] };
   expect(created.id).toMatch(/^agt_[0-9a-f-]{36}$/);
+  expect(created.modalities).toEqual(expect.arrayContaining(["text", "image"]));
 
   const card = page.locator(`.agent-card[data-agent-id="${created.id}"]`);
   await expect(card).toBeVisible();
@@ -103,6 +105,9 @@ test("creates an Agent without a project and runs it in its private workspace", 
   await card.getByRole("button", { name: "运行 →" }).click();
   await expect(page.locator("#run-source-path")).toHaveValue("");
   await page.locator("#run-prompt").fill("browser e2e");
+  await page.locator("#run-execution").selectOption("media");
+  await page.locator("#run-output-mb").fill("8");
+  await page.locator("#run-timeout").fill("10");
   const runResponsePromise = page.waitForResponse(
     (response) =>
       response.url().endsWith("/v1/runs") &&
@@ -111,7 +116,9 @@ test("creates an Agent without a project and runs it in its private workspace", 
   await page.locator("#submit-run").click();
   const runResponse = await runResponsePromise;
   expect(runResponse.status()).toBe(202);
-  const run = (await runResponse.json()) as { id: string };
+  const run = (await runResponse.json()) as { id: string; request: { execution?: { class: string; maxOutputBytes: number }; options?: { timeoutMs: number } } };
+  expect(run.request.execution).toEqual({ class: "media", maxOutputBytes: 8 * 1_024 * 1_024 });
+  expect(run.request.options?.timeoutMs).toBe(10 * 60 * 1_000);
 
   await expect
     .poll(async () => {

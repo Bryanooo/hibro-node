@@ -80,6 +80,13 @@ export const TEST_SUITES: readonly TestSuiteDefinition[] = [
     description: "统一 Hibro Home 与旧数据迁移",
   },
   {
+    id: "storage.artifact-limits",
+    file: "artifact-limits.test.ts",
+    layer: "unit",
+    area: "storage",
+    description: "产物配额配置的安全回退",
+  },
+  {
     id: "cli.management",
     file: "hibro-cli.test.ts",
     layer: "integration",

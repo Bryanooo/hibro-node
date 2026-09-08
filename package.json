@@ -22,6 +22,7 @@
     "test:report": "node --experimental-strip-types scripts/test-runner.ts --junit",
     "test:e2e": "playwright test",
     "test:docker": "node --experimental-strip-types scripts/docker-smoke.ts",
+    "test:docker:runtime": "HIBRO_BUNDLED_ENGINES=none HIBRO_DOCKER_SMOKE_RUNTIME_ONLY=true node --experimental-strip-types scripts/docker-smoke.ts",
     "check": "node --experimental-strip-types scripts/check.ts",
     "typecheck": "tsc --noEmit",
     "validate": "npm run typecheck && npm run check && npm test",

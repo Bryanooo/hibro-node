@@ -444,8 +444,16 @@ docker logs hibro-node-local
 
 ```bash
 npm run validate
+npm run test:e2e
+npm run test:docker:runtime
+# 发布前；会实际安装并检查三个官方 CLI，依赖 npm/GitHub 网络
+npm run test:docker
 npm run smoke:claude
 ```
+
+`test:docker:runtime` 使用不内置引擎的当前源码镜像验证 Node 服务、SQLite、`.hibro`
+布局、Agent 工作空间隔离和重启恢复。`test:docker` 另行验证完整三引擎发行镜像，并对
+镜像构建设置默认 10 分钟上限；可用 `HIBRO_DOCKER_BUILD_TIMEOUT_MS` 调整。
 
 引擎安装、升级、启停、回滚边界和 Core 调度语义见
 [`docs/engine-lifecycle.md`](docs/engine-lifecycle.md)。

@@ -11,7 +11,7 @@ interface CommandResult {
 async function command(
   executable: string,
   args: string[],
-  options: { showOutput?: boolean } = {},
+  options: { showOutput?: boolean; timeoutMs?: number } = {},
 ): Promise<CommandResult> {
   const child = spawn(executable, args, {
     cwd: process.cwd(),
@@ -20,6 +20,14 @@ async function command(
   });
   let stdout = "";
   let stderr = "";
+  let timedOut = false;
+  const timeout = options.timeoutMs
+    ? setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGTERM");
+      }, options.timeoutMs)
+    : undefined;
+  timeout?.unref();
   child.stdout?.on("data", (chunk: Buffer) => {
     stdout += chunk.toString();
   });
@@ -27,9 +35,14 @@ async function command(
     stderr += chunk.toString();
   });
   const exitCode = await new Promise<number>((resolveExit, reject) => {
-    child.once("error", reject);
+    child.once("error", (error) => {
+      if (timeout) clearTimeout(timeout);
+      reject(error);
+    });
     child.once("exit", (code, signal) => {
-      if (signal) reject(new Error(`${executable} 被信号 ${signal} 终止`));
+      if (timeout) clearTimeout(timeout);
+      if (timedOut) reject(new Error(`${executable} 超过 ${options.timeoutMs}ms 构建时限`));
+      else if (signal) reject(new Error(`${executable} 被信号 ${signal} 终止`));
       else resolveExit(code ?? 1);
     });
   });
@@ -97,6 +110,7 @@ async function containerBaseURL(container: string): Promise<string> {
 async function main(): Promise<void> {
   const suffix = `${process.pid}-${Date.now()}`;
   const suppliedImage = process.env.HIBRO_DOCKER_SMOKE_IMAGE;
+  const runtimeOnly = process.env.HIBRO_DOCKER_SMOKE_RUNTIME_ONLY === "true";
   const image = suppliedImage ?? `hibro-node-smoke:${suffix}`;
   const container = `hibro-node-smoke-${suffix}`;
   const volume = `hibro-node-smoke-data-${suffix}`;
@@ -110,10 +124,14 @@ async function main(): Promise<void> {
       for (const [name, value] of [
         ["DEBIAN_MIRROR", process.env.HIBRO_DEBIAN_MIRROR],
         ["NPM_REGISTRY", process.env.HIBRO_NPM_REGISTRY],
+        ["HIBRO_BUNDLED_ENGINES", process.env.HIBRO_BUNDLED_ENGINES],
       ] as const) {
         if (value) buildArgs.push("--build-arg", `${name}=${value}`);
       }
-      await command("docker", ["build", ...buildArgs, "--tag", image, "."], { showOutput: true });
+      await command("docker", ["build", ...buildArgs, "--tag", image, "."], {
+        showOutput: true,
+        timeoutMs: Number(process.env.HIBRO_DOCKER_BUILD_TIMEOUT_MS ?? 10 * 60_000),
+      });
     }
     await command("docker", ["volume", "create", volume]);
     volumeCreated = true;
@@ -153,9 +171,13 @@ async function main(): Promise<void> {
       }>;
     }>(`${baseURL}/v1/engines`);
     assert.equal(engines.engines.length, 3);
-    assert.ok(engines.engines.every((engine) => engine.installed));
-    assert.ok(engines.engines.every((engine) => engine.source === "bundled"));
-    assert.ok(engines.engines.every((engine) => Boolean(engine.runtimeVersion)));
+    if (runtimeOnly) {
+      assert.ok(engines.engines.every((engine) => !engine.installed));
+    } else {
+      assert.ok(engines.engines.every((engine) => engine.installed));
+      assert.ok(engines.engines.every((engine) => engine.source === "bundled"));
+      assert.ok(engines.engines.every((engine) => Boolean(engine.runtimeVersion)));
+    }
 
     const agents = await json<{
       agents: Array<{ agent: { id: string; engine: string; source?: unknown } }>;
@@ -220,7 +242,7 @@ async function main(): Promise<void> {
     );
 
     process.stdout.write(
-      "Docker smoke passed: image startup, SQLite, /data/.hibro, isolated workspaces and restart persistence\n",
+      `Docker ${runtimeOnly ? "runtime" : "three-engine release"} smoke passed: image startup, SQLite, /data/.hibro, isolated workspaces and restart persistence\n`,
     );
   } finally {
     if (containerCreated) {

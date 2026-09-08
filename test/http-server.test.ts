@@ -74,6 +74,22 @@ test("HTTP API creates and returns a run", async (context) => {
   assert.match(consoleScript, /Agent 专属空间（实际工作位置）/);
   assert.match(consoleScript, /performEngineAction/);
 
+  const capabilitiesResponse = await fetch(`${base}/v1/capabilities`);
+  assert.equal(capabilitiesResponse.status, 200);
+  const capabilities = (await capabilitiesResponse.json()) as {
+    features: string[];
+    resources: {
+      maxConcurrentRuns: number;
+      maxRunDurationMs: number;
+      maxArtifactBytes: number;
+    };
+  };
+  assert.ok(capabilities.features.includes("artifact-inputs-v1"));
+  assert.ok(capabilities.features.includes("long-running-jobs-v1"));
+  assert.equal(capabilities.resources.maxConcurrentRuns, manager.getSettings().maxConcurrentRuns);
+  assert.equal(capabilities.resources.maxRunDurationMs, 7 * 24 * 60 * 60 * 1_000);
+  assert.ok(capabilities.resources.maxArtifactBytes > 0);
+
   const engineCatalogResponse = await fetch(`${base}/v1/engines`);
   assert.equal(engineCatalogResponse.status, 200);
   const engineCatalog = (await engineCatalogResponse.json()) as {

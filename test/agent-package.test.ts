@@ -23,6 +23,7 @@ function bundle(
       metadata: { name: "Market Analyst", slug: "market-analyst" },
       spec: {
         engine,
+        modalities: ["text", "image"],
         instructions: "instructions.md",
         skills: [{ name: "market-data", path: "skills/market-data" }],
         workspace: { strategy: "persistent", access: "workspace-write" },
@@ -67,6 +68,14 @@ test("Agent package validation is deterministic and rejects unsafe paths", () =>
       manifest: { ...first.manifest, spec: { ...first.manifest.spec, engine: "unknown" } },
     }),
     /unsupported engine/,
+  );
+  assert.deepEqual(validateAgentPackage(first).manifest.spec.modalities, ["text", "image"]);
+  assert.throws(
+    () => validateAgentPackage({
+      ...first,
+      manifest: { ...first.manifest, spec: { ...first.manifest.spec, modalities: ["text", "hologram" as never] } },
+    }),
+    /unsupported value/,
   );
 });
 

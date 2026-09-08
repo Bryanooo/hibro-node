@@ -27,6 +27,7 @@ interface LegacyAgentDefinition {
   source?: AgentDefinition["source"];
   workspace?: AgentDefinition["workspace"];
   maxConcurrency?: number;
+  modalities?: AgentDefinition["modalities"];
   model?: string;
   instructions?: string;
   allowedTools?: string[];
@@ -133,6 +134,7 @@ export class FileAgentRegistry {
         : {}),
       workspace: { ...input.workspace },
       maxConcurrency: input.maxConcurrency ?? 1,
+      modalities: input.modalities ?? previous?.modalities ?? ["text"],
       model: input.model?.trim() || undefined,
       instructions: input.instructions?.trim() || undefined,
       allowedTools: input.allowedTools,
@@ -187,6 +189,7 @@ export class FileAgentRegistry {
         : {}),
       workspace: value.workspace ?? migrateWorkspace(value.workspaceMode),
       maxConcurrency: value.maxConcurrency ?? 1,
+      modalities: value.modalities ?? ["text"],
       model: value.model,
       instructions: value.instructions,
       allowedTools: value.allowedTools,
@@ -224,6 +227,9 @@ export class FileAgentRegistry {
     }
     if (!Number.isInteger(agent.maxConcurrency) || agent.maxConcurrency < 1) {
       throw new Error("maxConcurrency must be a positive integer");
+    }
+    if (!agent.modalities?.length || agent.modalities.some((item) => !["text", "image", "audio", "video"].includes(item))) {
+      throw new Error("modalities must contain supported output types");
     }
     return agent;
   }
@@ -305,6 +311,7 @@ export class FileAgentRegistry {
       enabled: true,
       workspace: { strategy: "persistent", access: variant.access },
       maxConcurrency: 1,
+      modalities: ["text"],
       allowedTools: variant.allowedTools,
       approvalPolicy: "workspace",
       allowDangerousSandbox: false,

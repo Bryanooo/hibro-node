@@ -57,6 +57,7 @@ import {
   traceContextFromMetadata,
 } from "./observability.ts";
 import type { EngineManager } from "./engine-manager.ts";
+import { nodeArtifactMaxBytes } from "./artifact-limits.ts";
 
 export interface RunManagerOptions {
   store: RunStore;
@@ -492,12 +493,23 @@ export class RunManager {
     };
     await visit(root);
     const result: ArtifactRecord[] = [];
+    let acceptedBytes = 0;
+    const runOutputLimit = run.request.execution?.maxOutputBytes ?? Number.MAX_SAFE_INTEGER;
     for (const path of files) {
       const info = await stat(path);
-      const maxBytes = Number(
-        process.env.HIBRO_NODE_ARTIFACT_MAX_BYTES ?? String(1024 * 1024 * 1024),
-      );
-      if (info.size > maxBytes) continue;
+      const maxBytes = nodeArtifactMaxBytes();
+      if (info.size > maxBytes || acceptedBytes + info.size > runOutputLimit) {
+        await this.emit(run.id, "artifact.skipped", {
+          fileName: basename(path),
+          relativePath: relative(root, path),
+          sizeBytes: info.size,
+          reason: info.size > maxBytes ? "file_limit_exceeded" : "run_output_quota_exceeded",
+          fileLimitBytes: maxBytes,
+          runOutputLimitBytes: runOutputLimit === Number.MAX_SAFE_INTEGER ? undefined : runOutputLimit,
+        });
+        continue;
+      }
+      acceptedBytes += info.size;
       const detected = artifactType(path);
       const relativePath = relative(root, path);
       const sha256 = await hashFile(path);
@@ -1191,6 +1203,20 @@ export class RunManager {
       (!Number.isFinite(input.options.timeoutMs) || input.options.timeoutMs <= 0)
     ) {
       throw new Error("timeoutMs must be a positive number");
+    }
+    if (input.options?.timeoutMs !== undefined && input.options.timeoutMs > 7 * 24 * 60 * 60 * 1_000) {
+      throw new Error("timeoutMs cannot exceed 7 days");
+    }
+    if (input.execution && !["interactive", "batch", "media"].includes(input.execution.class)) {
+      throw new Error("unsupported execution class");
+    }
+    const maxOutputBytes = input.execution?.maxOutputBytes;
+    const nodeArtifactLimit = nodeArtifactMaxBytes();
+    if (
+      maxOutputBytes !== undefined &&
+      (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes <= 0 || maxOutputBytes > nodeArtifactLimit)
+    ) {
+      throw new Error("maxOutputBytes must be within the Node artifact limit");
     }
   }
 

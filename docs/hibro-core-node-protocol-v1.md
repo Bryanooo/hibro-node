@@ -111,6 +111,7 @@ The first application frame sent by Node. It includes:
 - installed engine capabilities and versions;
 - engine lifecycle state (`installed`, `enabled`, runtime version, managed version and readiness);
 - supported protocol versions;
+- bounded resource advertisement (`maxConcurrentRuns`, `maxRunDurationMs`, `maxArtifactBytes`);
 - optional resume token and last received sequences.
 
 ### `core.welcome`
@@ -228,6 +229,29 @@ stateDiagram-v2
 ```
 
 ### `run.create`
+
+Nodes that advertise `long-running-jobs-v1` accept an execution profile in
+`run.create.payload.request.execution`:
+
+```json
+{
+  "class": "media",
+  "maxOutputBytes": 1073741824
+}
+```
+
+`class` is `interactive`, `batch`, or `media`. Core validates the requested timeout and output
+quota against the target Node's advertised resources before durably dispatching the Run. Node
+enforces a hard seven-day timeout ceiling and the smaller of its configured per-file limit and the
+Run's aggregate output quota. Files beyond that quota are not catalogued or synchronized and emit
+an `artifact.skipped` observability event with a stable reason. A media
+Run remains an ordinary durable Run, so cancellation, approval, events, Trace, Artifact upload and
+Team recovery use the same protocol rather than a provider-specific side channel.
+
+An Agent package may declare `spec.modalities` with one or more of `text`, `image`, `audio`, and
+`video`. This describes deliverables, not the underlying model vendor. Provider-specific API calls
+belong in the Agent's reviewed Skills/tools; generated files must be written to the injected Hibro
+artifact directory.
 
 When the Node advertises `artifact-inputs-v1`, `run.create.payload.inputArtifacts` may contain up
 to 32 short-lived download grants. Each descriptor includes `artifactId`, `fileName`, `contentType`,

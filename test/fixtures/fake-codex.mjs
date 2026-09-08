@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createInterface } from "node:readline";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 const args = process.argv.slice(2);
 if (args[0] === "--version") {
@@ -74,6 +74,11 @@ lines.on("line", (line) => {
 
 function finishTurn(prompt) {
   let text = `CODEX:${prompt}`;
+  if (prompt.includes("VERIFY_ARTIFACT_INPUT")) {
+    const inputPath = prompt.match(/:\s+(\/[^\s]+)\s+\(text\/markdown/)?.[1];
+    const inputPresent = Boolean(inputPath && existsSync(inputPath) && readFileSync(inputPath).byteLength > 0);
+    text = `CODEX:VERIFY_ARTIFACT_INPUT:INPUT_PRESENT=${inputPresent}`;
+  }
   if (prompt.includes("VERIFY_PROJECT_PLATFORM")) {
     const artifactDirectory = developerInstructions.match(/Hibro 产物目录：([^\n]+)/)?.[1]?.trim();
     if (artifactDirectory) {

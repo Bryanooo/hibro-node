@@ -14,6 +14,7 @@ import type { ConversationEvent } from "./conversation-domain.ts";
 import type { ArtifactRecord } from "./domain.ts";
 import { createId } from "./identity.ts";
 import { hibroNodeVersion } from "./version.ts";
+import { nodeArtifactMaxBytes } from "./artifact-limits.ts";
 
 export class CoreTransport {
   private readonly manager: RunManager;
@@ -405,8 +406,14 @@ export class CoreTransport {
           "redacted-engine-logs",
           "engine-lifecycle-v1",
           "artifact-inputs-v1",
+          "long-running-jobs-v1",
         ],
         maxFrameBytes: 2_097_152,
+        resources: {
+          maxConcurrentRuns: settings.maxConcurrentRuns,
+          maxRunDurationMs: 7 * 24 * 60 * 60 * 1_000,
+          maxArtifactBytes: nodeArtifactMaxBytes(),
+        },
       },
     });
   }
@@ -474,6 +481,7 @@ export class CoreTransport {
       agentId: string;
       request: Record<string, unknown>;
       environment?: Record<string, unknown>;
+      inputArtifacts?: import("./domain.ts").RunArtifactInput[];
     };
     const environment: Record<string, string> = {};
     const reservedEnvironment = new Set(["PATH", "HOME", "SHELL", "PWD", "NODE_OPTIONS", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "OPENCLAW_HOME", "OPENCLAW_STATE_DIR", "OPENCLAW_CONFIG_PATH", "OPENCLAW_WORKSPACE_DIR"]);
@@ -509,6 +517,7 @@ export class CoreTransport {
         {
           ...(payload.request as unknown as Parameters<RunManager["create"]>[0]),
           agentId: payload.agentId,
+          ...(payload.inputArtifacts?.length ? { inputArtifacts: payload.inputArtifacts } : {}),
           metadata: {
             ...((payload.request.metadata as Record<string, unknown> | undefined) ?? {}),
             coreCommandId: payload.commandId,

@@ -274,7 +274,11 @@ export const CONSOLE_HTML = `<!doctype html>
           <label><span>本次项目目录（可选）</span><input id="run-source-path" placeholder="/workspace/project" /><small>仅为这次 Run 创建独立工作副本，不会改变 Agent 的默认空间。</small></label>
           <div class="field-grid two">
             <label><span>会话键</span><input id="run-session-key" placeholder="default" /></label>
-            <label><span>超时</span><select id="run-timeout"><option value="">使用系统默认</option><option value="60000">1 分钟</option><option value="300000">5 分钟</option><option value="900000">15 分钟</option></select></label>
+            <label><span>最长运行（分钟）</span><input id="run-timeout" type="number" min="1" max="10080" placeholder="使用系统默认" /></label>
+          </div>
+          <div class="field-grid two">
+            <label><span>执行类型</span><select id="run-execution"><option value="interactive">交互任务</option><option value="batch">长时批处理</option><option value="media">媒体生成</option></select></label>
+            <label><span>产物总配额（MB）</span><input id="run-output-mb" type="number" min="1" placeholder="使用 Node 上限" /></label>
           </div>
           <div class="field-grid two">
             <label><span>文件权限</span><select id="run-sandbox"><option value="">跟随 Agent 空间设置</option><option value="read-only">只读</option><option value="workspace-write">允许修改专属空间</option><option value="danger-full-access">完全访问</option></select></label>
@@ -314,6 +318,7 @@ export const CONSOLE_HTML = `<!doctype html>
             <label><span>专属空间权限</span><select id="agent-workspace-access" required><option value="read-only">只读</option><option value="workspace-write">允许修改</option></select></label>
           </div>
           <label><span>审批策略</span><select id="agent-approval-policy" required><option value="strict">安全模式 · 敏感操作逐次询问</option><option value="workspace">工作区自动 · 推荐</option><option value="unrestricted">完全自动 · 高风险</option></select><small id="agent-approval-hint">工作区内的常规开发操作自动允许；网络、提权、部署和破坏性命令仍需审批。</small></label>
+          <fieldset><legend>可交付的产物类型</legend><div class="check-grid"><label><input class="agent-modality" type="checkbox" value="text" checked />文本</label><label><input class="agent-modality" type="checkbox" value="image" />图片</label><label><input class="agent-modality" type="checkbox" value="audio" />音频</label><label><input class="agent-modality" type="checkbox" value="video" />视频</label></div></fieldset>
           <div class="workspace-preview" id="agent-workspace-preview"></div>
           <label><span>最大并发</span><input id="agent-concurrency" type="number" min="1" max="16" value="1" required /></label>
           <label><span>Agent 指令</span><textarea id="agent-instructions" rows="4" placeholder="每次运行都会附加到系统提示词。"></textarea></label>
@@ -1830,6 +1835,7 @@ function openAgentDialog(agentId) {
   byId("agent-dangerous").checked = false;
   byId("agent-concurrency").value = "1";
   byId("agent-approval-policy").value = "workspace";
+  document.querySelector('.agent-modality[value="text"]').checked = true;
   const runtime = agentRuntime(agentId);
   const agent = runtime?.agent;
   byId("agent-dialog-title").textContent = agent ? "编辑 " + agent.name : "新建 Agent";
@@ -1850,6 +1856,7 @@ function openAgentDialog(agentId) {
     byId("agent-approval-policy").value = agent.approvalPolicy || "workspace";
     byId("agent-enabled").checked = agent.enabled;
     byId("agent-dangerous").checked = agent.allowDangerousSandbox === true;
+    document.querySelectorAll(".agent-modality").forEach((item) => item.checked = (agent.modalities || ["text"]).includes(item.value));
   } else {
     byId("agent-source-path").value = "";
     byId("agent-workspace-strategy").value = "persistent";
@@ -2061,6 +2068,8 @@ function confirmAction(title, copy, callback) {
 async function saveAgent(event) {
   event.preventDefault();
   const sourcePath = byId("agent-source-path").value.trim();
+  const modalities = [...document.querySelectorAll(".agent-modality:checked")].map((item) => item.value);
+  if (!modalities.length) { notify("请至少选择一种产物类型", "error"); return; }
   const body = {
     name: byId("agent-name").value.trim(),
     description: byId("agent-description").value.trim() || undefined,
@@ -2071,6 +2080,7 @@ async function saveAgent(event) {
       access: byId("agent-workspace-access").value,
     },
     maxConcurrency: Number(byId("agent-concurrency").value),
+    modalities,
     model: byId("agent-model").value.trim() || undefined,
     instructions: byId("agent-instructions").value.trim() || undefined,
     allowedTools: byId("agent-tools").value.split(",").map((value) => value.trim()).filter(Boolean),
@@ -2107,7 +2117,7 @@ async function submitRun(event) {
   const sandbox = byId("run-sandbox").value;
   const options = {};
   const sourcePath = byId("run-source-path").value.trim();
-  if (timeout) options.timeoutMs = Number(timeout);
+  if (timeout) options.timeoutMs = Number(timeout) * 60 * 1000;
   if (sandbox) options.sandbox = sandbox;
   try {
     const run = await json("/v1/runs", {
@@ -2119,6 +2129,10 @@ async function submitRun(event) {
         source: sourcePath ? { type: "local", path: sourcePath } : undefined,
         sessionKey: byId("run-session-key").value.trim() || undefined,
         freshSession: byId("run-fresh-session").checked,
+        execution: {
+          class: byId("run-execution").value,
+          ...(byId("run-output-mb").value ? { maxOutputBytes: Number(byId("run-output-mb").value) * 1024 * 1024 } : {}),
+        },
         options,
       }),
     });

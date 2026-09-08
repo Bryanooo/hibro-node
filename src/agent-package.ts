@@ -52,6 +52,7 @@ export interface AgentManifest {
     approvalPolicy?: ApprovalPolicy | undefined;
     allowDangerousSandbox?: boolean | undefined;
     maxConcurrency?: number | undefined;
+    modalities?: Array<"text" | "image" | "audio" | "video"> | undefined;
   };
 }
 
@@ -144,6 +145,16 @@ export function validateAgentManifest(value: unknown): AgentManifest {
   if (!Number.isInteger(maxConcurrency) || Number(maxConcurrency) < 1 || Number(maxConcurrency) > 32) {
     throw new Error("spec.maxConcurrency must be an integer from 1 to 32");
   }
+  const modalities = spec.modalities === undefined
+    ? ["text" as const]
+    : (() => {
+        if (!Array.isArray(spec.modalities)) throw new Error("spec.modalities must be an array");
+        const values = [...new Set(spec.modalities.map(String))];
+        if (!values.length || values.some((value) => !["text", "image", "audio", "video"].includes(value))) {
+          throw new Error("spec.modalities contains an unsupported value");
+        }
+        return values as Array<"text" | "image" | "audio" | "video">;
+      })();
   const skills = spec.skills === undefined
     ? undefined
     : (() => {
@@ -187,6 +198,7 @@ export function validateAgentManifest(value: unknown): AgentManifest {
       approvalPolicy,
       allowDangerousSandbox,
       maxConcurrency: Number(maxConcurrency),
+      modalities,
     },
   };
 }
@@ -354,6 +366,7 @@ export class AgentPackageManager {
           access: manifest.spec.workspace?.access ?? "workspace-write",
         },
         maxConcurrency: manifest.spec.maxConcurrency ?? 1,
+        modalities: manifest.spec.modalities ?? ["text"],
         model: manifest.spec.model,
         instructions: undefined,
         allowedTools: manifest.spec.allowedTools,

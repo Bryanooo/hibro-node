@@ -56,6 +56,46 @@ test("persists a successful run and ordered events", async () => {
   assert.equal(events.at(-1)?.type, "run.completed");
 });
 
+test("accepts long media runs and enforces their aggregate output quota", async () => {
+  class MediaAdapter implements AgentEngineAdapter {
+    readonly engineType = "claude-code" as const;
+    async doctor() { return { installed: true, ready: true }; }
+    async execute(input: EngineExecuteInput) {
+      const match = input.options?.appendSystemPrompt?.match(/Hibro 产物目录：([^\n]+)/);
+      assert.ok(match);
+      await writeFile(join(match[1] as string, "poster.png"), Buffer.alloc(8));
+      await writeFile(join(match[1] as string, "clip.mp4"), Buffer.alloc(8));
+      return { result: "media complete" };
+    }
+  }
+  const root = await mkdtemp(join(tmpdir(), "hibro-media-run-"));
+  const instance = new RunManager({ adapter: new MediaAdapter(), store: new FileRunStore(root) });
+  await instance.init();
+  const created = await instance.create({
+    prompt: "render",
+    workspace: process.cwd(),
+    execution: { class: "media", maxOutputBytes: 10 },
+    options: { timeoutMs: 60_000 },
+  });
+  const completed = await instance.waitForTerminal(created.id);
+  assert.equal(completed.status, "completed", JSON.stringify(completed.error));
+  const artifacts = (await instance.listArtifacts()).filter((item) => item.runId === created.id);
+  assert.equal(artifacts.length, 1);
+  assert.ok((artifacts[0]?.sizeBytes ?? 0) <= 10);
+  assert.ok((await instance.eventsAfter(created.id)).some((event) =>
+    event.type === "artifact.skipped" && event.payload.reason === "run_output_quota_exceeded"
+  ));
+  await assert.rejects(
+    () => instance.create({
+      prompt: "too long",
+      workspace: process.cwd(),
+      execution: { class: "batch" },
+      options: { timeoutMs: 8 * 24 * 60 * 60 * 1_000 },
+    }),
+    /cannot exceed 7 days/,
+  );
+});
+
 test("passes Project secrets ephemerally without persisting their values", async () => {
   let observedSecret: string | undefined;
   class SecretAdapter implements AgentEngineAdapter {

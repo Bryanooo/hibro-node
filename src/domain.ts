@@ -97,6 +97,7 @@ export interface AgentDefinition {
   source?: AgentSource | undefined;
   workspace: AgentWorkspaceConfig;
   maxConcurrency: number;
+  modalities?: Array<"text" | "image" | "audio" | "video"> | undefined;
   model?: string | undefined;
   instructions?: string | undefined;
   allowedTools?: string[] | undefined;
@@ -246,6 +247,10 @@ export interface CreateRunInput {
   options?: EngineRunOptions;
   metadata?: Record<string, unknown>;
   inputArtifacts?: RunArtifactInput[] | undefined;
+  execution?: {
+    class: "interactive" | "batch" | "media";
+    maxOutputBytes?: number | undefined;
+  } | undefined;
 }
 
 export interface RunError {

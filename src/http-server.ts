@@ -20,6 +20,28 @@ import { hibroNodeVersion } from "./version.ts";
 import type { AgentPackageBundle } from "./agent-package.ts";
 import { NodeObservabilityService } from "./observability-service.ts";
 import type { EngineManager } from "./engine-manager.ts";
+import { nodeArtifactMaxBytes } from "./artifact-limits.ts";
+
+const NODE_RUNTIME_FEATURES = [
+  "agent-registration",
+  "remote-runs",
+  "run-events",
+  "inline-artifacts",
+  "object-storage-artifacts",
+  "conversations",
+  "conversation-events",
+  "conversation-approvals",
+  "agent-as-code-v1",
+  "agent-revision-deployments",
+  "observability-trace-v1",
+  "structured-run-events",
+  "redacted-engine-logs",
+  "engine-lifecycle-v1",
+  "artifact-inputs-v1",
+  "long-running-jobs-v1",
+] as const;
+
+const MAX_RUN_DURATION_MS = 7 * 24 * 60 * 60 * 1_000;
 
 export interface HttpServerOptions {
   host: string;
@@ -217,6 +239,12 @@ export function createHibroHttpServer(options: HttpServerOptions): Server {
             ...doctor,
           })),
           transports: ["http", "sse"],
+          features: NODE_RUNTIME_FEATURES,
+          resources: {
+            maxConcurrentRuns: settings.maxConcurrentRuns,
+            maxRunDurationMs: MAX_RUN_DURATION_MS,
+            maxArtifactBytes: nodeArtifactMaxBytes(),
+          },
           conversations: conversations?.capabilities(),
           core: {
             ...manager.getCoreConnection(),
@@ -324,7 +352,16 @@ export function createHibroHttpServer(options: HttpServerOptions): Server {
             version: hibroNodeVersion(),
             kind: "platform",
             status: "active",
-            capabilities: ["multi-agent", "agent-as-code-v1", "workspaces", "trace-v1", "artifacts"],
+            capabilities: [
+              "multi-agent",
+              "agent-as-code-v1",
+              "workspaces",
+              "trace-v1",
+              "artifacts",
+              "artifact-inputs-v1",
+              "long-running-jobs-v1",
+              "multimodal-agent-definitions-v1",
+            ],
             permissions: [],
             dependencies: [],
             provides: { apiNamespaces: ["/v1/runs", "/v1/observability"] },
@@ -565,6 +602,7 @@ export function createHibroHttpServer(options: HttpServerOptions): Server {
           ...(body.source ? { source: body.source } : {}),
           workspace: body.workspace,
           maxConcurrency: body.maxConcurrency ?? 1,
+          modalities: body.modalities ?? ["text"],
           model: body.model,
           instructions: body.instructions,
           allowedTools: body.allowedTools,
